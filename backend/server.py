@@ -677,7 +677,7 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
         
         if not matched:
             classified_transaction = transaction.copy()
-            classified_transaction["matched_ledger"] = "Suspense A/c"
+            classified_transaction["matched_ledger"] = "Suspense"
             classified_transactions.append(classified_transaction)
             if narration: # Only add non-empty narrations to the cluster list
                 unmatched_narrations.append(narration)
@@ -693,7 +693,7 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
         "classified_transactions": classified_transactions,
         "unmatched_clusters": [cluster.dict() for cluster in clusters],
         "total_transactions": len(classified_transactions),
-        "matched_transactions": len([t for t in classified_transactions if t["matched_ledger"] != "Suspense A/c"]),
+        "matched_transactions": len([t for t in classified_transactions if t["matched_ledger"] != "Suspense"]),
         "unmatched_transactions": len(unmatched_narrations)
     }
 # --- END OF REPLACEMENT ---
@@ -754,7 +754,7 @@ async def generate_tally_vouchers(voucher_data: TallyVoucherData):
         contra_vouchers = []
         
         for transaction in transactions:
-            ledger = transaction.get("matched_ledger", "Suspense A/c")
+            ledger = transaction.get("matched_ledger", "Suspense")
             amount = float(transaction.get("amount", 0))
             narration = transaction.get("narration", "")
             date = transaction.get("date", "")

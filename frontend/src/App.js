@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
@@ -267,9 +267,14 @@ const FileUpload = () => {
         setSelectedClient={setSelectedClient}
         onSuccess={(newStatementId) => {
           setShowMappingModal(false);
+  
+          // Clear the old file data to prevent resubmission
+          setUploadedFile(null);
+          setFileData(null);
           // Navigate to the new statement details page
-          navigate(`/statements/${newStatementId}`); 
-          toast.success('Statement processed successfully!');
+          navigate(`/statements/${newStatementId}`);
+        
+          toast.success('Statement processed and saved!');
         }}
       />
     </div>
@@ -284,7 +289,7 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
   const [loading, setLoading] = useState(false);
   
   // useMemo will re-calculate this data only when fileData changes
-const previewData = useMemo(() => {
+  const previewData = useMemo(() => {
   if (!fileData) {
     return { headers: [], rows: [] };
   }
@@ -341,16 +346,18 @@ const previewData = useMemo(() => {
         balance_column: mapping.balance_column === 'none' ? null : mapping.balance_column
       };
 
-      await axios.post(
+      const response = await axios.post(
         `${API}/confirm-mapping/${fileData.file_id}?client_id=${selectedClient}`,
         mappingData
       );
       
-      onSuccess(response.data.statement_id);
+      onSuccess(response.data.statement_id);      
       toast.success('Mapping confirmed and statement processed!');
+
     } catch (error) {
-      toast.error('Failed to confirm mapping');
+      toast.error('Failed to confirm mapping. Please try again.');
       console.error('Mapping error:', error);
+      onClose();
     } finally {
       setLoading(false);
     }
@@ -927,47 +934,143 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated }) => {
     </div>
   );
 };
-// --- END OF NEW ClusterCard COMPONENT ---
+
+// --- ADD THIS ENTIRE NEW COMPONENT ---
+
+const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
+  console.log("Data received by table:", transactions); // <--- ADD THIS LINE
+
+  // Filter out the 'Suspense' items, as they are handled by the cluster section
+  const matchedTransactions = transactions.filter(
+    t => t.matched_ledger !== "Suspense"
+  );
+
+  if (matchedTransactions.length === 0) {
+    return <p className="text-center text-slate-500 py-4">No transactions were matched to existing rules.</p>;
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b">
+            <th className="p-2 text-left font-semibold">Date</th>
+            <th className="p-2 text-left font-semibold">Description</th>
+            <th className="p-2 text-right font-semibold">Amount (INR)</th>
+            <th className="p-2 text-left font-semibold">CR/DR</th>
+            <th className="p-2 text-left font-semibold">Matched Ledger</th>
+            <th className="p-2 text-center font-semibold">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {matchedTransactions.map(transaction => (
+            <tr key={transaction.Srl || Math.random()} className="border-b hover:bg-slate-50">
+              <td className="p-2 whitespace-nowrap">{transaction['Value Date'] || transaction['Date']}</td>
+              <td className="p-2 max-w-sm truncate">{transaction.Description}</td>
+              <td className="p-2 text-right font-mono">{transaction['Amount (INR)']?.toLocaleString()}</td>
+              <td className="p-2">{transaction['CR/DR']}</td>
+              <td className="p-2">
+                <Badge variant="secondary">{transaction.matched_ledger}</Badge>
+              </td>
+              <td className="p-2 text-center">
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={() => onFlagAsIncorrect(transaction)}
+                  title="Flag as incorrect match"
+                >
+                  <X className="w-4 h-4 text-red-500" />
+                </Button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// --- END OF NEW COMPONENT ---
+
 // Statement Classification Page Component
 const StatementDetailsPage = () => {
   const { statementId } = useParams();
   const [statement, setStatement] = useState(null);
   const [classificationResult, setClassificationResult] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true); // Renamed from 'loading'
   const [classifying, setClassifying] = useState(false);
 
-  const runClassification = async () => {
-    setClassifying(true);
+  
+// --- SIMPLIFIED runClassification ---
+const runClassification = useCallback(async () => {
+  setClassifying(true);
+  try {
+    const response = await axios.post(`${API}/classify-transactions/${statementId}`);
+    setClassificationResult(response.data);
+    // The toast can be removed from here if it's annoying on re-classify
+  } catch (error) {
+    toast.error("Failed to run classification.");
+  } finally {
+    setClassifying(false);
+  }
+}, [statementId]);
+// --- END OF REPLACEMENT ---
+  // --- ADD this new handler function ---
+  // --- SIMPLIFIED handleFlagAsIncorrect ---
+const handleFlagAsIncorrect = (transactionToFlag) => {
+  setClassificationResult(prevResult => {
+    if (!prevResult) return null;
+
+    // 1. Remove from classified
+    const newClassified = prevResult.classified_transactions.filter(
+      t => (t.Srl || t.id) !== (transactionToFlag.Srl || transactionToFlag.id)
+    );
+
+    // 2. Create the new cluster
+    const newCluster = {
+      cluster_id: `flagged-${transactionToFlag.Srl || Math.random()}`,
+      narrations: [transactionToFlag.Description],
+      suggested_regex: `.*${transactionToFlag.Description.split(/[^A-Za-z0-9]/).filter(Boolean)[0]}.*`,
+    };
+
+    // 3. Return the new, complete state object
+    return {
+      ...prevResult,
+      classified_transactions: newClassified,
+      unmatched_clusters: [newCluster, ...prevResult.unmatched_clusters],
+    };
+  });
+  toast.info("Transaction moved to 'Unmatched' for re-classification.");
+};
+// --- END OF NEW HANDLER ---
+useEffect(() => {
+  const fetchStatement = async () => {
+    setLoading(true);
     try {
-      const response = await axios.post(`${API}/classify-transactions/${statementId}`);
-      setClassificationResult(response.data);
-      toast.success("Classification complete!");
+      const response = await axios.get(`${API}/statements/${statementId}`);
+      setStatement(response.data);
     } catch (error) {
-      toast.error("Failed to run classification.");
+      toast.error("Failed to fetch statement details.");
+      setStatement(null); // Clear statement on error
     } finally {
-      setClassifying(false);
+      setLoading(false);
     }
   };
+  fetchStatement();
+}, [statementId]); // This effect only runs when the statementId changes
 
-  // Fetch initial data when the component loads
-  useEffect(() => {
-    const fetchData = async () => {
-     setLoading(true);
-      try {
-        // We need the client_id to create new rules
-        const statementRes = await axios.get(`${API}/statements/${statementId}`);
-        setStatement(statementRes.data);
-        await runClassification();
-      } catch (error) {
-        toast.error("Failed to fetch statement details.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
-  }, [statementId]);
+// Effect 2: Run the classification ONLY when the statement has been successfully fetched.
+useEffect(() => {
+  if (statement) {
+    // We wrap runClassification in an async IIFE to handle the final setLoading
+    (async () => {
+      await runClassification();
+      setLoading(false); // Turn off the main loading indicator AFTER classification is done
+    })();
+  }
+}, [statement, runClassification]); // Dependency array is correct
 
-  if (!classificationResult) {
+  if (loading || !classificationResult) {
     return <div>Loading classification results...</div>;
   }
   
@@ -1014,9 +1117,14 @@ const StatementDetailsPage = () => {
       
       {/* Classified Transactions Table Section */}
       <Card className="border-0 shadow-sm">
-        <CardHeader><CardTitle>Classified Transactions</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle>Classified Transactions</CardTitle>
+        </CardHeader>
         <CardContent>
-           <p>Table of classified transactions will go here.</p>
+        <ClassifiedTransactionsTable
+          transactions={classificationResult.classified_transactions}
+          onFlagAsIncorrect={handleFlagAsIncorrect}
+        />
         </CardContent>
       </Card>
     </div>
