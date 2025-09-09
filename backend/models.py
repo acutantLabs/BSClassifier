@@ -12,10 +12,12 @@ class Client(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String, nullable=False, unique=True, index=True)
+    # Add the new suspense ledger field with a sensible default
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    # Add the updated_at field for consistency
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    # Define the relationship to the new BankAccount model
+    bank_accounts = relationship("BankAccount", back_populates="client", cascade="all, delete-orphan")
     ledger_rules = relationship("LedgerRule", back_populates="client", cascade="all, delete-orphan")
 
 # This model is a direct replacement for each record in your Airtable.
@@ -58,3 +60,20 @@ class BankStatement(Base):
     processed_data = Column(JSON, nullable=True)
 
     client = relationship("Client")
+
+class BankAccount(Base):
+    __tablename__ = 'bank_accounts'
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    bank_name = Column(String, nullable=False)
+    ledger_name = Column(String, nullable=False, unique=True) # e.g., "IDBI Bank_12467"
+    contra_list = Column(JSON, nullable=True) # Stores a list of strings
+    filter_list = Column(JSON, nullable=True) # Stores a list of strings
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # Define the foreign key to link this account to a client
+    client_id = Column(String, ForeignKey('clients.id'), nullable=False)
+    client = relationship("Client", back_populates="bank_accounts")
+# --- END OF NEW CLASS ---

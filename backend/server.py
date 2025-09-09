@@ -2,6 +2,8 @@ from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from pathlib import Path
+from sqlalchemy import select, func, outerjoin
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -82,14 +84,32 @@ class ClientCreate(ClientBase):
     """The model used when CREATING a new client via the API."""
     pass
 
+class ClientUpdate(ClientBase):
+    """Model used for updating an existing client's name."""
+    pass
+
 class ClientModel(ClientBase):
-    """The model used when RETURNING a client from the API."""
+    """A simple model for a single client's details."""
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class ClientModelWithCounts(ClientBase):
+    """The full model representing a Client as returned from the API."""
     id: str
     created_at: datetime
     updated_at: datetime
 
+    # Add the new count fields
+    ledger_rule_count: int
+    bank_statement_count: int
+    bank_account_count: int
+
     class Config:
-        orm_mode = True # Ensures compatibility with SQLAlchemy
+        from_attributes = True
 
 # Pydantic models for LedgerRule data
 class LedgerRuleBase(BaseModel):
@@ -106,9 +126,8 @@ class LedgerRule(LedgerRuleBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True # Ensures compatibility with SQLAlchemy
-
-
+        # --- THIS IS THE FIX ---
+        from_attributes = True
 
 class BankStatement(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -119,6 +138,24 @@ class BankStatement(BaseModel):
     statement_format: str  # "single_amount_crdr" or "separate_credit_debit"
     raw_data: List[Dict]
     processed_data: Optional[List[Dict]] = None
+
+class BankStatement(BaseModel):
+    """
+    Pydantic model for returning a BankStatement object from the API.
+    """
+    id: str
+    client_id: str
+    filename: str
+    upload_date: datetime
+    column_mapping: Dict[str, Optional[str]]
+    statement_format: str
+    
+    # We include the raw_data and processed_data fields
+    raw_data: List[Dict]
+    processed_data: Optional[List[Dict]] = None
+
+    class Config:
+        from_attributes = True # Ensures it's compatible with our SQLAlchemy model
 
 class ColumnMapping(BaseModel):
     date_column: str
@@ -154,6 +191,32 @@ class TallyVoucherData(BaseModel):
     bank_ledger_name: str
     transactions: List[Dict]
     excluded_ledgers: List[str] = []
+# Pydantic models for BankAccount data
+class BankAccountBase(BaseModel):
+    """Base model for bank account, used for creation and updates."""
+    client_id: str
+    bank_name: str
+    ledger_name: str
+    contra_list: Optional[List[str]] = []
+    filter_list: Optional[List[str]] = []
+
+class BankAccountCreate(BankAccountBase):
+    """Model used when creating a new bank account."""
+    pass
+
+class BankAccountUpdate(BankAccountBase):
+    """Model used when updating an existing bank account."""
+    pass
+
+class BankAccountModel(BankAccountBase):
+    """Full model representing a BankAccount as returned from the API."""
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    class Config:
+        # --- THIS IS THE FIX ---
+        from_attributes = True
+
 
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
@@ -384,20 +447,56 @@ async def create_client(client_data: ClientCreate, db: AsyncSession = Depends(da
     return db_client
 # --- END OF REPLACEMENT ---
 
-@api_router.get("/clients", response_model=List[ClientModel])
+# --- CLEANER REPLACEMENT for get_clients ---
+@api_router.get("/clients", response_model=List[ClientModelWithCounts])
 async def get_clients(db: AsyncSession = Depends(database.get_db)):
-    """Get all clients"""
-    # Create a query to select all records from the clients table
-    query = select(models.Client)
+    """Get all clients with their associated counts"""
+    # (The complex query logic remains the same)
+    ledger_rule_subquery = (
+        select(models.LedgerRule.client_id, func.count(models.LedgerRule.id).label("ledger_rule_count"))
+        .group_by(models.LedgerRule.client_id)
+        .subquery()
+    )
+    # ... (other subqueries are the same) ...
+    bank_statement_subquery = (
+        select(models.BankStatement.client_id, func.count(models.BankStatement.id).label("bank_statement_count"))
+        .group_by(models.BankStatement.client_id)
+        .subquery()
+    )
+    bank_account_subquery = (
+        select(models.BankAccount.client_id, func.count(models.BankAccount.id).label("bank_account_count"))
+        .group_by(models.BankAccount.client_id)
+        .subquery()
+    )
+
+    query = (
+        select(
+            models.Client,
+            func.coalesce(ledger_rule_subquery.c.ledger_rule_count, 0).label("ledger_rule_count"),
+            func.coalesce(bank_statement_subquery.c.bank_statement_count, 0).label("bank_statement_count"),
+            func.coalesce(bank_account_subquery.c.bank_account_count, 0).label("bank_account_count"),
+        )
+        .outerjoin(ledger_rule_subquery, models.Client.id == ledger_rule_subquery.c.client_id)
+        .outerjoin(bank_statement_subquery, models.Client.id == bank_statement_subquery.c.client_id)
+        .outerjoin(bank_account_subquery, models.Client.id == bank_account_subquery.c.client_id)
+        .order_by(models.Client.name)
+    )
     
-    # Execute the query
     result = await db.execute(query)
     
-    # Get the actual client objects from the result
-    clients = result.scalars().all()
-    
-    return clients
-# --- END OF REPLACEMENT ---
+    # Process the results more elegantly
+    clients_with_counts = []
+    for row in result.mappings(): # .mappings() gives us dict-like rows
+        client_data = row['Client'].__dict__
+        client_data.update({
+            "ledger_rule_count": row['ledger_rule_count'],
+            "bank_statement_count": row['bank_statement_count'],
+            "bank_account_count": row['bank_account_count'],
+        })
+        clients_with_counts.append(ClientModelWithCounts.model_validate(client_data))
+
+    return clients_with_counts
+# --- END OF CLEANER REPLACEMENT ---
 
 # --- REPLACEMENT for get_client ---
 @api_router.get("/clients/{client_id}", response_model=ClientModel)
@@ -412,7 +511,23 @@ async def get_client(client_id: str, db: AsyncSession = Depends(database.get_db)
         
     return client
 # --- END OF REPLACEMENT ---
-
+# --- ADD THIS MISSING ENDPOINT ---
+@api_router.put("/clients/{client_id}", response_model=ClientModel)
+async def update_client(client_id: str, client_data: ClientUpdate, db: AsyncSession = Depends(database.get_db)):
+    """Update an existing client's name"""
+    db_client = await db.get(models.Client, client_id)
+    if not db_client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    
+    # Update the client object with the new data
+    update_data = client_data.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_client, key, value)
+        
+    await db.commit()
+    await db.refresh(db_client)
+    return db_client
+# --- END OF MISSING ENDPOINT ---
 # File Upload and Processing
 # --- REPLACEMENT for upload_statement ---
 @api_router.post("/upload-statement", response_model=FileUploadResponse)
@@ -524,6 +639,7 @@ async def get_client_ledger_rules(client_id: str, db: AsyncSession = Depends(dat
 # --- END OF REPLACEMENT ---
 
 # Transaction Classification
+
 # --- REPLACEMENT for classify_transactions ---
 @api_router.post("/classify-transactions/{statement_id}")
 async def classify_transactions(statement_id: str, db: AsyncSession = Depends(database.get_db)):
@@ -542,7 +658,6 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
     
     # Ensure raw_data is a list of dicts
     raw_data = statement.raw_data if isinstance(statement.raw_data, list) else []
-
     for transaction in raw_data:
         narration = str(transaction.get(statement.column_mapping.get("narration_column"), ""))
         
@@ -604,6 +719,29 @@ async def create_tally_ledgers(ledger_names: List[str]):
         "status": "success"
     }
 
+# Bank Account Management
+@api_router.post("/bank-accounts", response_model=BankAccountModel)
+async def create_bank_account(account_data: BankAccountCreate, db: AsyncSession = Depends(database.get_db)):
+    """Create a new bank account for a client"""
+    # Check if the client exists
+    client = await db.get(models.Client, account_data.client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+        
+    db_account = models.BankAccount(**account_data.dict())
+    db.add(db_account)
+    await db.commit()
+    await db.refresh(db_account)
+    return db_account
+
+@api_router.get("/clients/{client_id}/bank-accounts", response_model=List[BankAccountModel])
+async def get_client_bank_accounts(client_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Get all bank accounts for a specific client"""
+    query = select(models.BankAccount).where(models.BankAccount.client_id == client_id)
+    result = await db.execute(query)
+    accounts = result.scalars().all()
+    return accounts
+
 @api_router.post("/tally/generate-vouchers")
 async def generate_tally_vouchers(voucher_data: TallyVoucherData):
     """Generate Tally import files (Receipt, Payment, Contra vouchers)"""
@@ -660,6 +798,14 @@ async def generate_tally_vouchers(voucher_data: TallyVoucherData):
         logging.error(f"Voucher generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating vouchers: {str(e)}")
 
+# ADD this to server.py
+@api_router.get("/statements/{statement_id}", response_model=BankStatement)
+async def get_statement(statement_id: str, db: AsyncSession = Depends(database.get_db)):
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    return statement
+#Include any new endpoints above this line
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -677,4 +823,3 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-

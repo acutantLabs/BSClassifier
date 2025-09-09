@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
 import './App.css';
@@ -265,9 +265,10 @@ const FileUpload = () => {
         clients={clients}
         selectedClient={selectedClient}
         setSelectedClient={setSelectedClient}
-        onSuccess={() => {
+        onSuccess={(newStatementId) => {
           setShowMappingModal(false);
-          navigate('/dashboard');
+          // Navigate to the new statement details page
+          navigate(`/statements/${newStatementId}`); 
           toast.success('Statement processed successfully!');
         }}
       />
@@ -345,7 +346,8 @@ const previewData = useMemo(() => {
         mappingData
       );
       
-      onSuccess();
+      onSuccess(response.data.statement_id);
+      toast.success('Mapping confirmed and statement processed!');
     } catch (error) {
       toast.error('Failed to confirm mapping');
       console.error('Mapping error:', error);
@@ -650,18 +652,21 @@ const ClientManagement = () => {
             <CardContent>
               <div className="space-y-2 text-sm text-slate-600">
                 <p>Created: {new Date(client.created_at).toLocaleDateString()}</p>
-                <p>Patterns: 0</p>
-                <p>Statements: 0</p>
+                <p>Patterns: <span className="font-bold">{client.ledger_rule_count}</span></p>
+                <p>Statements: <span className="font-bold">{client.bank_statement_count}</span></p>
+                <p>Bank Accounts: <span className="font-bold">{client.bank_account_count}</span></p>
               </div>
               <div className="flex gap-2 mt-4">
                 <Button variant="outline" size="sm">
                   <Edit className="w-4 h-4 mr-1" />
                   Edit
                 </Button>
-                <Button variant="outline" size="sm">
+                <Link to={`/clients/${client.id}`}>
+                  <Button variant="outline" size="sm">
                   <Eye className="w-4 h-4 mr-1" />
                   View
                 </Button>
+                </Link>
               </div>
             </CardContent>
           </Card>
@@ -708,6 +713,317 @@ const ClientManagement = () => {
   );
 };
 
+// Client Details Page Component
+const ClientDetailsPage = () => {
+  const { clientId } = useParams(); // Get the client ID from the URL
+  const [client, setClient] = useState(null);
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch client and bank account data when the component loads
+  useEffect(() => {
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const clientRes = await axios.get(`${API}/clients/${clientId}`);
+        setClient(clientRes.data);
+
+        const accountsRes = await axios.get(`${API}/clients/${clientId}/bank-accounts`);
+        setBankAccounts(accountsRes.data);
+      } catch (error) {
+        toast.error("Failed to fetch client details.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+  }, [clientId]);
+
+  const handleAccountCreated = (newAccount) => {
+    setBankAccounts(prev => [...prev, newAccount]);
+    setShowAddAccountModal(false);
+  };
+
+  if (loading) {
+    return <div>Loading client details...</div>;
+  }
+
+  if (!client) {
+    return <div>Client not found.</div>;
+  }
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">{client.name}</h1>
+        <p className="text-slate-600 mt-2">Manage client settings and bank accounts.</p>
+      </div>
+      
+      <Card className="border-0 shadow-sm">
+        <CardHeader>
+          <CardTitle>Bank Accounts</CardTitle>
+          <CardDescription>Manage the bank accounts associated with this client.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex justify-end mb-4">
+            <Button onClick={() => setShowAddAccountModal(true)}>
+              <Plus className="w-4 h-4 mr-2" />
+              Add Bank Account
+            </Button>
+          </div>
+          <div className="space-y-4">
+            {bankAccounts.length > 0 ? (
+              bankAccounts.map(account => (
+                <div key={account.id} className="p-4 border rounded-lg flex justify-between items-center">
+                  <div>
+                    <p className="font-bold">{account.bank_name}</p>
+                    <p className="text-sm text-slate-500">{account.ledger_name}</p>
+                  </div>
+                  <Button variant="outline" size="sm">Edit</Button>
+                </div>
+              ))
+            ) : (
+              <p className="text-center text-slate-500 py-4">No bank accounts added yet.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Add/Edit Bank Account Modal */}
+      <AddBankAccountModal
+        isOpen={showAddAccountModal}
+        onClose={() => setShowAddAccountModal(false)}
+        clientId={clientId}
+        onSuccess={handleAccountCreated}
+      />
+    </div>
+  );
+};
+
+
+// --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
+
+const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
+  const [bankName, setBankName] = useState('');
+  const [ledgerName, setLedgerName] = useState('');
+  const [contraList, setContraList] = useState('');
+  const [filterList, setFilterList] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!bankName || !ledgerName) {
+      toast.error("Bank Name and Ledger Name are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const payload = {
+        client_id: clientId,
+        bank_name: bankName,
+        ledger_name: ledgerName,
+        // Convert comma-separated strings to arrays of strings, filtering out empty entries
+        contra_list: contraList.split(',').map(s => s.trim()).filter(Boolean),
+        filter_list: filterList.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      
+      const response = await axios.post(`${API}/bank-accounts`, payload);
+      toast.success("Bank account created successfully!");
+      onSuccess(response.data); // Pass the new account data back to the parent
+    } catch (error) {
+      toast.error("Failed to create bank account.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add New Bank Account</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <Label>Bank Name</Label>
+            <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="e.g., IDBI Bank" />
+          </div>
+          <div>
+            <Label>Ledger Name</Label>
+            <Input value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} placeholder="e.g., IDBI Bank_12467" />
+          </div>
+          <div>
+            <Label>Contra Ledgers (comma-separated)</Label>
+            <Textarea value={contraList} onChange={(e) => setContraList(e.target.value)} placeholder="e.g., ICICI Bank_..., Cash" />
+          </div>
+          <div>
+            <Label>Filter List (comma-separated)</Label>
+            <Textarea value={filterList} onChange={(e) => setFilterList(e.target.value)} placeholder="e.g., IDBI 4003" />
+          </div>
+        </div>
+        <div className="flex justify-end gap-4 pt-4">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSubmit} disabled={loading}>
+            {loading ? 'Saving...' : 'Save Account'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// --- ADD THIS ENTIRE NEW COMPONENT ---
+// --- ADD THIS NEW ClusterCard COMPONENT ---
+const ClusterCard = ({ cluster, clientId, onRuleCreated }) => {
+  const [ledgerName, setLedgerName] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleCreateRule = async () => {
+    if (!ledgerName.trim()) {
+      toast.error("Ledger name is required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const payload = {
+        client_id: clientId,
+        ledger_name: ledgerName,
+        regex_pattern: cluster.suggested_regex,
+        sample_narrations: cluster.narrations,
+      };
+      await axios.post(`${API}/ledger-rules`, payload);
+      toast.success(`Rule for "${ledgerName}" created successfully!`);
+      onRuleCreated(); // Notify the parent component
+    } catch (error) {
+      toast.error("Failed to create rule.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
+      <p className="text-sm font-semibold">Suggested Regex:</p>
+      <pre className="text-xs bg-slate-200 p-2 rounded-md overflow-x-auto">{cluster.suggested_regex}</pre>
+      <p className="text-sm font-semibold">Sample Narrations ({cluster.narrations.length} items):</p>
+      <ScrollArea className="h-24 p-2 border rounded-md bg-white">
+        <ul className="text-xs list-disc pl-4 space-y-1">
+          {cluster.narrations.map((n, i) => <li key={i} className="truncate">{n}</li>)}
+        </ul>
+      </ScrollArea>
+      <div className="flex items-center gap-4 pt-2">
+        <Input 
+          placeholder="Enter Ledger Name..." 
+          value={ledgerName}
+          onChange={(e) => setLedgerName(e.target.value)}
+        />
+        <Button onClick={handleCreateRule} disabled={loading}>
+          <Plus className="w-4 h-4 mr-2" />
+          {loading ? 'Creating...' : 'Create Rule'}
+        </Button>
+      </div>
+    </div>
+  );
+};
+// --- END OF NEW ClusterCard COMPONENT ---
+// Statement Classification Page Component
+const StatementDetailsPage = () => {
+  const { statementId } = useParams();
+  const [statement, setStatement] = useState(null);
+  const [classificationResult, setClassificationResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [classifying, setClassifying] = useState(false);
+
+  const runClassification = async () => {
+    setClassifying(true);
+    try {
+      const response = await axios.post(`${API}/classify-transactions/${statementId}`);
+      setClassificationResult(response.data);
+      toast.success("Classification complete!");
+    } catch (error) {
+      toast.error("Failed to run classification.");
+    } finally {
+      setClassifying(false);
+    }
+  };
+
+  // Fetch initial data when the component loads
+  useEffect(() => {
+    const fetchData = async () => {
+     setLoading(true);
+      try {
+        // We need the client_id to create new rules
+        const statementRes = await axios.get(`${API}/statements/${statementId}`);
+        setStatement(statementRes.data);
+        await runClassification();
+      } catch (error) {
+        toast.error("Failed to fetch statement details.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+  }, [statementId]);
+
+  if (!classificationResult) {
+    return <div>Loading classification results...</div>;
+  }
+  
+  return (
+    <div className="space-y-8">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900">Classification Review</h1>
+          <p className="text-slate-600 mt-2">
+            {classificationResult.matched_transactions} of {classificationResult.total_transactions} transactions matched.
+          </p>
+        </div>
+        <Button onClick={runClassification} disabled={classifying}>
+          <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
+          Re-classify
+        </Button>
+      </div>
+
+      {/* Unmatched Transaction Clusters Section */}
+      <Card className="border-0 shadow-sm">
+        <CardHeader>
+          <CardTitle>Unmatched Transaction Clusters</CardTitle>
+          <CardDescription>
+            Review these groups of similar transactions and create new rules.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {classificationResult.unmatched_clusters.length > 0 ? (
+            // --- THIS IS THE NEW, INTERACTIVE REPLACEMENT ---
+            classificationResult.unmatched_clusters.map(cluster => (
+              <ClusterCard 
+                key={cluster.cluster_id} 
+                cluster={cluster} 
+                clientId={statement.client_id}
+                onRuleCreated={runClassification} // This passes the "Re-classify" function to the card
+              />
+            ))
+            // --- END OF NEW REPLACEMENT ---
+          ) : (
+            <p className="text-center text-slate-500 py-4">Congratulations! All transactions were matched.</p>
+          )}
+        </CardContent>
+      </Card>
+      
+      {/* Classified Transactions Table Section */}
+      <Card className="border-0 shadow-sm">
+        <CardHeader><CardTitle>Classified Transactions</CardTitle></CardHeader>
+        <CardContent>
+           <p>Table of classified transactions will go here.</p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+// --- END OF NEW COMPONENT ---
 // Navigation Component
 const Navigation = () => {
   return (
@@ -753,6 +1069,8 @@ function App() {
             <Route path="/upload" element={<FileUpload />} />
             <Route path="/clients" element={<ClientManagement />} />
             <Route path="/patterns" element={<div>Regex Patterns (Coming Soon)</div>} />
+            <Route path="/clients/:clientId" element={<ClientDetailsPage />} />
+            <Route path="/statements/:statementId" element={<StatementDetailsPage />} />
           </Routes>
         </main>
       </Router>
