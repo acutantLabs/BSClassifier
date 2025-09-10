@@ -298,35 +298,50 @@ def extract_keywords(text: str, devalued_keywords: set) -> set:
             meaningful_tokens.add(token)
     return meaningful_tokens
 
+# --- REPLACEMENT for generate_regex_from_narrations ---
 async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession) -> str:
-    """Generate a precise regex pattern from narrations using common, meaningful keywords."""
+    """
+    Generate a precise, order-aware regex pattern from narrations using common, meaningful keywords.
+    """
     if not narrations:
         return ""
 
-    # Fetch devalued keywords and convert to a set for fast lookups
+    # Fetch devalued keywords for filtering
     result = await db.execute(select(models.DevaluedKeyword.keyword))
     devalued_keywords_set = set(result.scalars().all())
-    
-    # Find keywords present in ALL narrations
-    keyword_sets = [extract_keywords(n, devalued_keywords_set) for n in narrations]
-    if not keyword_sets:
-        return ".*" # Fallback if no keywords are found
 
+    # 1. Find keywords that are common to ALL narrations in the cluster
+    keyword_sets = [extract_keywords(n, devalued_keywords_set) for n in narrations]
+    if not any(keyword_sets):
+        return ".*"  # Fallback if no meaningful keywords are found at all
     common_keywords = set.intersection(*keyword_sets)
+
+    # 2. If no keywords are common across all items, the cluster is weak.
+    # Fallback to a simple regex based on the first item's first keyword.
+    if not common_keywords:
+        first_narration_keywords = sorted(list(extract_keywords(narrations[0], devalued_keywords_set)))
+        if first_narration_keywords:
+            return f".*\\b{re.escape(first_narration_keywords[0])}\\b.*"
+        return ".*"
+
+    # 3. Get an ordered list of all tokens from the first narration to use as a template.
+    first_narration_ordered_tokens = re.split(r'[^A-Z0-9@]+', narrations[0].upper())
+
+    # 4. Build the final list by picking common keywords in the order they appear in the template.
+    ordered_common_keywords = []
+    seen = set()
+    for token in first_narration_ordered_tokens:
+        if token in common_keywords and token not in seen:
+            ordered_common_keywords.append(token)
+            seen.add(token) # Prevents adding a keyword more than once
+
+    # 5. Construct the final regex pattern from the ordered list.
+    if ordered_common_keywords:
+        pattern = ".*".join(f"\\b{re.escape(k)}\\b" for k in ordered_common_keywords)
+        return f".*{pattern}.*" # Wrap with wildcards for flexibility
     
-    if common_keywords:
-        # Build the regex with word boundaries for precision
-        pattern = ".*".join(f"\\b{re.escape(k)}\\b" for k in sorted(list(common_keywords)))
-        return pattern
-    
-    # Fallback if there are no keywords common to ALL narrations
-    # We find the most frequent meaningful keyword from the first narration
-    first_narration_keywords = extract_keywords(narrations[0], devalued_keywords_set)
-    if first_narration_keywords:
-        return f"\\b{re.escape(sorted(list(first_narration_keywords))[0])}\\b"
-    
-    return ".*" # Final fallback
-# --- END OF REPLACEMENT ---
+    # This is a final fallback, which should now be rarely needed.
+    return f".*\\b{re.escape(sorted(list(common_keywords))[0])}\\b.*"
 
 # --- FINAL REPLACEMENT for cluster_narrations ---
 async def cluster_narrations(
@@ -341,7 +356,7 @@ async def cluster_narrations(
     # Fetch devalued keywords for the vectorizer
     result = await db.execute(select(models.DevaluedKeyword.keyword))
     devalued_keywords = result.scalars().all()
-    stop_words = list(devalued_keywords) + ['english']
+    stop_words = [kw.lower() for kw in devalued_keywords] + ['english'] # FIX: Ensure all stop words are lowercase
     vectorizer = TfidfVectorizer(
         stop_words=stop_words,
         max_features=100,

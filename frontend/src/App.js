@@ -883,46 +883,90 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 
 
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
-
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
 const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
+  console.log("Data for this cluster:", cluster.transactions);
+
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
   
-  // State to hold validation results
+  // State for live validation and highlighting
   const [validation, setValidation] = useState({ 
-    matchStatus: 'none', // Can be 'all', 'partial', or 'none'
+    matchStatus: 'none', // 'all', 'partial', or 'none'
     matchCount: 0,
-    matchedNarrations: [] // Store which narrations actually matched
+    highlightedNarrations: cluster.transactions.map(t => t.Description) // Start with plain text
   });
+  
+  // State specifically for the false positive warning
+  const [falsePositiveCount, setFalsePositiveCount] = useState(0);
 
-  // --- START OF INTERACTIVE VALIDATION LOGIC ---
+  // This single, powerful useEffect handles all live validation and highlighting.
   useEffect(() => {
-    if (!editableRegex) {
-      setValidation({ matchStatus: 'none', matchCount: 0, matchedNarrations: [] });
-      return;
-    }
-
-    const currentMatched = [];
-    let currentMatchCount = 0;
-
-    for (const transaction of cluster.transactions) {
+    // Helper function to safely test a regex.
+    const testRegex = (regexStr, text) => {
+      if (!text) return false; // Safety check for null/undefined text
       try {
-        const re = new RegExp(editableRegex, 'i'); // Case-insensitive matching
-        if (re.test(transaction.Description)) {
-          currentMatchCount++;
-          currentMatched.push(transaction.Description);
-        }
+        return new RegExp(regexStr, 'i').test(text);
       } catch (e) {
-        // Invalid regex, treat as no match
-        setValidation({ matchStatus: 'none', matchCount: 0, matchedNarrations: [] });
-        return;
+        return false; // Invalid regex syntax doesn't match anything
+      }
+    };
+    
+    // Helper function to highlight the matched part of a string.
+    const getHighlightedHtml = (regexStr, text) => {
+      if (!text) return { html: '', matched: false };
+      let fpCount = 0;
+    if (editableRegex && otherNarrations) {
+      try {
+        const re = new RegExp(editableRegex, 'i');
+        for (const other of otherNarrations) {
+          // --- FIX 1: Test 'other' directly, as it's now an array of strings ---
+          if (re.test(other)) {
+            fpCount++;
+          }
+        }
+      } catch(e) { /* Invalid regex, do nothing */ }
+    }
+    setFalsePositiveCount(fpCount);
+      try {
+        const re = new RegExp(regexStr, 'i');
+        const match = text.match(re);
+        
+        // If no match or the regex is empty/invalid, return plain text.
+        if (!match || !match[0] || !regexStr) {
+          return { html: text.replace(/</g, '&lt;'), matched: false };
+        }
+        
+        // Escape the text to prevent HTML injection and then highlight the match.
+        const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
+        return { html: highlightedHtml, matched: true };
+        
+      } catch (e) {
+        // On regex error, just return the plain text.
+        return { html: text.replace(/</g, '&lt;'), matched: false };
+      }
+    };
+
+    // --- 1. False Positive Check Logic ---
+    let fpCount = 0;
+    if (editableRegex && otherNarrations) {
+      // Loop through narrations from *other* clusters
+      for (const other of otherNarrations) {
+        if (testRegex(editableRegex, other.Description)) {
+          fpCount++;
+        }
       }
     }
+    setFalsePositiveCount(fpCount);
+
+    // --- 2. Main Validation & Highlighting Logic ---
+    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t.Description));
+    const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
 
     let status = 'none';
-    if (currentMatchCount === cluster.transactions.length) {
+    if (currentMatchCount > 0 && currentMatchCount === cluster.transactions.length) {
       status = 'all';
     } else if (currentMatchCount > 0) {
       status = 'partial';
@@ -931,16 +975,15 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
     setValidation({
       matchStatus: status,
       matchCount: currentMatchCount,
-      matchedNarrations: currentMatched,
+      highlightedNarrations: newHighlightedResults.map(result => result.html)
     });
 
-  }, [editableRegex, cluster.transactions]);
-  // --- END OF INTERACTIVE VALIDATION LOGIC ---
+  }, [editableRegex, cluster.transactions, otherNarrations]);
 
-  // --- START OF UPDATED RULE CREATION LOGIC ---
   const handleCreateRule = async () => {
     if (!ledgerName.trim()) { toast.error("Ledger name is required."); return; }
-    if (validation.matchStatus === 'none') { toast.error("Cannot create a rule with a pattern that matches no samples."); return; }
+    if (validation.matchStatus === 'none') { toast.error("Cannot create a rule with a pattern that doesn't match."); return; }
+    if (falsePositiveCount > 0) { toast.error("Cannot create a rule with a pattern that has false positives."); return; }
     try { new RegExp(editableRegex); } catch (e) { toast.error("Invalid Regex syntax."); return; }
 
     setLoading(true);
@@ -949,30 +992,21 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
         client_id: clientId,
         ledger_name: ledgerName,
         regex_pattern: editableRegex,
-        // IMPORTANT: Send only the narrations that actually matched the final regex
-        sample_narrations: validation.matchedNarrations,
+        sample_narrations: cluster.transactions.map(t => t.Description), // Send original narrations
       };
       await axios.post(`${API}/ledger-rules`, payload);
       toast.success(`Rule for "${ledgerName}" created!`);
       onRuleCreated();
-    } catch (error) { 
-      toast.error("Failed to create rule."); 
-    } finally { 
-      setLoading(false); 
-    }
+    } catch (error) { toast.error("Failed to create rule."); } 
+    finally { setLoading(false); }
   };
-  // --- END OF UPDATED RULE CREATION LOGIC ---
 
-  const formatCurrency = (amount) => {
-    const num = Number(amount);
-    return isNaN(num) ? amount : num.toLocaleString('en-IN', { maximumFractionDigits: 2 });
-  };
+  const formatCurrency = (amount) => { /* ... unchanged ... */ };
 
   return (
     <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
       <div className="flex justify-between items-center">
         <p className="text-sm font-semibold">Define Regex Pattern</p>
-        {/* --- START OF DYNAMIC VALIDATION DISPLAY --- */}
         <div className="flex items-center gap-2">
           {(() => {
             const percentage = Math.round((validation.matchCount / cluster.transactions.length) * 100);
@@ -980,37 +1014,43 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
               case 'all':
                 return <span className="text-sm font-bold text-green-600 flex items-center"><CheckCircle2 className="w-4 h-4 mr-1"/> All Match</span>;
               case 'partial':
-                return <span className="text-sm font-bold text-yellow-600">{`Partial Match [${validation.matchCount}/${cluster.transactions.length} captured]`}</span>;
+                return <span className="text-sm font-bold text-yellow-600">{`Partial Match [${validation.matchCount}/${cluster.transactions.length}]`}</span>;
               default:
                 return <span className="text-sm font-bold text-red-600 flex items-center"><AlertCircle className="w-4 h-4 mr-1"/> No Match</span>;
             }
           })()}
         </div>
-        {/* --- END OF DYNAMIC VALIDATION DISPLAY --- */}
       </div>
       
       <Textarea
         className="font-mono text-xs bg-white"
         value={editableRegex}
         onChange={(e) => setEditableRegex(e.target.value)}
-        placeholder="Enter or modify the regex pattern..."
       />
+
+      {/* --- THIS IS THE RESTORED FALSE POSITIVE WARNING --- */}
+      {falsePositiveCount > 0 && (
+        <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <div><span className="font-bold">Warning:</span> This pattern incorrectly matches <span className="font-extrabold">{falsePositiveCount}</span> other transaction(s).</div>
+        </div>
+      )}
 
       <p className="text-sm font-semibold">Sample Transactions ({cluster.transactions.length} items):</p>
       
+      {/* --- THIS IS THE RESTORED NARRATION HIGHLIGHTING --- */}
       <ScrollArea className="h-32 p-2 border rounded-md bg-white">
-        <div className="text-xs space-y-2">
-          {cluster.transactions.map((transaction, i) => (
-            <div key={i} className="flex items-center justify-between gap-2 p-1 rounded-md transition-colors ${validation.matchedNarrations.includes(transaction.Description) ? 'bg-green-100' : ''}`">
-              <span className="truncate" title={transaction.Description}>
-                {transaction.Description}
-              </span>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <Badge variant={transaction['CR/DR'] === 'CR' ? 'default' : 'destructive'} className="h-5">
-                  {transaction['CR/DR']}
+        <div className="text-xs space-y-1 font-mono">
+          {validation.highlightedNarrations.map((html, i) => (
+            <div key={i} className="flex items-center justify-between gap-2 p-1">
+               <div className="truncate" dangerouslySetInnerHTML={{ __html: html }} />
+               {/* Display tags for the corresponding original transaction */}
+               <div className="flex items-center gap-2 flex-shrink-0">
+                <Badge variant={cluster.transactions[i]['CR/DR'] === 'CR' ? 'default' : 'destructive'} className="h-5">
+                  {cluster.transactions[i]['CR/DR']}
                 </Badge>
-                <Badge variant="outline" className="font-mono">
-                  {formatCurrency(transaction['Amount (INR)'])}
+                <Badge variant="outline">
+                  {formatCurrency(cluster.transactions[i]['Amount (INR)'])}
                 </Badge>
               </div>
             </div>
@@ -1021,18 +1061,16 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
       <div className="flex items-center gap-4 pt-2">
         <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
         <Button 
-          onClick={handleCreateRule} 
-          // --- UPDATED DISABLED LOGIC ---
-          disabled={loading || validation.matchStatus === 'none' || !ledgerName.trim()}>
-          <Plus className="w-4 h-4 mr-2" />
-          {loading ? 'Creating...' : 'Create Rule'}
+            onClick={handleCreateRule} 
+            // --- UPDATED DISABLED LOGIC TO INCLUDE FALSE POSITIVE CHECK ---
+            disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
+          <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
       </div>
     </div>
   );
 };
 
-// --- END OF DEFINITIVE REPLACEMENT ---
 // --- END OF REPLACEMENT ---
 
 // --- ADD THIS ENTIRE NEW COMPONENT ---
