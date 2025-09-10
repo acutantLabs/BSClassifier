@@ -604,31 +604,99 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
         logging.error(f"File upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 # --- END OF REPLACEMENT ---
+# --- ADD THIS HELPER FUNCTION ---
+def normalize_transaction_data(
+    raw_data: List[Dict], mapping: "ColumnMapping"
+) -> List[Dict]:
+    """
+    Normalizes raw transaction data from separate credit/debit columns
+    into a single amount column and a CR/DR indicator column.
+    """
+    if mapping.statement_format != "separate_credit_debit":
+        return raw_data  # No changes needed if not in the separate format
 
-# --- FINAL, CORRECTED VERSION of confirm_column_mapping ---
+    normalized_data = []
+    credit_col = mapping.credit_column
+    debit_col = mapping.debit_column
+
+    if not credit_col or not debit_col:
+        # If columns are not defined, we cannot proceed with normalization.
+        return raw_data
+
+    for row in raw_data:
+        new_row = row.copy()
+        try:
+            # Safely convert to numeric, coercing errors to NaN, then to 0.0
+            credit_val = pd.to_numeric(row.get(credit_col), errors='coerce')
+            debit_val = pd.to_numeric(row.get(debit_col), errors='coerce')
+            credit_val = credit_val if pd.notna(credit_val) else 0.0
+            debit_val = debit_val if pd.notna(debit_val) else 0.0
+            
+            # Logic to determine Amount and CR/DR
+            if credit_val > 0:
+                new_row["Amount (INR)"] = credit_val
+                new_row["CR/DR"] = "CR"
+            elif debit_val > 0:
+                new_row["Amount (INR)"] = debit_val
+                new_row["CR/DR"] = "DR"
+            else:
+                # Handle rows with 0 in both, or non-standard entries
+                new_row["Amount (INR)"] = 0.0
+                new_row["CR/DR"] = "N/A"
+
+            # Remove original credit/debit columns to avoid duplication
+            if credit_col in new_row:
+                del new_row[credit_col]
+            if debit_col in new_row:
+                del new_row[debit_col]
+
+            normalized_data.append(new_row)
+
+        except (ValueError, TypeError):
+            # If conversion fails for a row, append it as is but log it.
+            logging.warning(f"Could not normalize row: {row}. Appending as is.")
+            normalized_data.append(row)
+            continue
+            
+    return normalized_data
+
+
+
+# --- REPLACEMENT for confirm_column_mapping ---
 @api_router.post("/confirm-mapping/{file_id}")
 async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id: str = Query(...), db: AsyncSession = Depends(database.get_db)):
     """Confirm column mapping and process statement"""
     temp_file = await db.get(models.TempFile, file_id)
     if not temp_file:
         raise HTTPException(status_code=404, detail="File not found or has expired")
-    
+
     try:
+        # --- START OF NEW LOGIC ---
+        # Normalize the data before creating the statement object
+        processed_raw_data = normalize_transaction_data(temp_file.raw_data, mapping)
+        
+        # If normalization occurred, we need to update the column mapping
+        # to reflect the new standardized column names.
+        final_mapping = mapping.dict()
+        if mapping.statement_format == "separate_credit_debit":
+            final_mapping["amount_column"] = "Amount (INR)"
+            final_mapping["crdr_column"] = "CR/DR"
+            # Set original columns to None as they no longer exist
+            final_mapping["credit_column"] = None
+            final_mapping["debit_column"] = None
+        # --- END OF NEW LOGIC ---
+
         # Create a permanent BankStatement record
         statement = models.BankStatement(
             client_id=client_id,
             filename=temp_file.filename,
-            column_mapping=mapping.dict(),
+            column_mapping=final_mapping,  # Use the potentially updated mapping
             statement_format=mapping.statement_format,
-            raw_data=temp_file.raw_data
+            raw_data=processed_raw_data  # Use the normalized data
         )
         
         db.add(statement)
-        
-        # --- THE CORRECT CODE ---
         await db.delete(temp_file)
-        # --- END OF CORRECT CODE ---
-        
         await db.commit()
         await db.refresh(statement)
         
@@ -638,8 +706,6 @@ async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id
         await db.rollback()
         logging.error(f"Mapping confirmation error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing mapping: {str(e)}")
-# --- END OF REPLACEMENT ---
-
 
 # Regex Pattern Management
 # --- REPLACEMENT for create_regex_pattern ---
