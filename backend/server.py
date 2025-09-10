@@ -329,22 +329,16 @@ async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession
 # --- END OF REPLACEMENT ---
 
 # --- FINAL REPLACEMENT for cluster_narrations ---
-async def cluster_narrations(narrations: List[str], db: AsyncSession, n_clusters: int = None) -> List[TransactionCluster]:
-    """Cluster similar narrations using TF-IDF and K-means, ignoring devalued keywords."""
-    if len(narrations) < 2:
-        if narrations:
-            # This call also needs to be awaited and passed the db session
-            suggested_regex = await generate_regex_from_narrations(narrations, db)
-            return [TransactionCluster(
-                cluster_id=str(uuid.uuid4()),
-                narrations=narrations,
-                suggested_regex=suggested_regex,
-                keyword_patterns=[],
-                confidence_score=0.5
-            )]
+async def cluster_narrations(
+    transactions: List[Dict[str, Any]], narration_column: str, db: AsyncSession, n_clusters: int = None
+) -> List[Dict[str, Any]]:
+    """Cluster similar transactions using TF-IDF and K-means, returning full transaction objects."""
+    
+    narrations = [str(t.get(narration_column, "")) for t in transactions]
+    if not any(narrations):
         return []
 
-    # ... (Fetching devalued keywords and vectorizer setup remains the same) ...
+    # Fetch devalued keywords for the vectorizer
     result = await db.execute(select(models.DevaluedKeyword.keyword))
     devalued_keywords = result.scalars().all()
     stop_words = list(devalued_keywords) + ['english']
@@ -356,47 +350,51 @@ async def cluster_narrations(narrations: List[str], db: AsyncSession, n_clusters
     )
 
     try:
-        # ... (K-means logic is the same) ...
         tfidf_matrix = vectorizer.fit_transform(narrations)
-        if n_clusters is None:
-            n_clusters = min(max(2, len(narrations) // 5), 10)
         
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        # Determine the optimal number of clusters if not specified
+        if n_clusters is None:
+            # Adjust clustering for smaller sample sizes
+            num_samples = len(transactions)
+            if num_samples <= 5:
+                n_clusters = num_samples
+            else:
+                 n_clusters = min(max(2, num_samples // 5), 10)
+        
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
         cluster_labels = kmeans.fit_predict(tfidf_matrix)
         
+        # Group full transaction objects by their assigned cluster label
         clusters = defaultdict(list)
         for idx, label in enumerate(cluster_labels):
-            clusters[label].append(narrations[idx])
+            clusters[label].append(transactions[idx])
         
+        # Prepare the final list of cluster objects for the frontend
         cluster_objects = []
-        for cluster_id, cluster_narrations_list in clusters.items():
-            # This call is correct
+        for cluster_id, clustered_transactions in clusters.items():
+            cluster_narrations_list = [str(t.get(narration_column, "")) for t in clustered_transactions]
             suggested_regex = await generate_regex_from_narrations(cluster_narrations_list, db)
-            cluster_objects.append(TransactionCluster(
-                cluster_id=str(uuid.uuid4()),
-                narrations=cluster_narrations_list,
-                suggested_regex=suggested_regex,
-                keyword_patterns=[],
-                confidence_score=0.7 if len(cluster_narrations_list) > 1 else 0.5
-            ))
+            
+            cluster_objects.append({
+                "cluster_id": str(uuid.uuid4()),
+                "transactions": clustered_transactions, # Return full objects
+                "suggested_regex": suggested_regex,
+            })
         return cluster_objects
     
     except Exception as e:
         logging.error(f"Clustering failed: {e}")
-        # --- CORRECTED FALLBACK LOGIC ---
-        # Fallback: create individual clusters using an async loop
+        # Fallback: Create a separate cluster for each transaction
         cluster_objects = []
-        for narration in narrations:
-            suggested_regex = await generate_regex_from_narrations([narration], db)
-            cluster_objects.append(TransactionCluster(
-                cluster_id=str(uuid.uuid4()),
-                narrations=[narration],
-                suggested_regex=suggested_regex,
-                keyword_patterns=[],
-                confidence_score=0.3
-            ))
+        for transaction in transactions:
+            narration = [str(transaction.get(narration_column, ""))]
+            suggested_regex = await generate_regex_from_narrations(narration, db)
+            cluster_objects.append({
+                "cluster_id": str(uuid.uuid4()),
+                "transactions": [transaction],
+                "suggested_regex": suggested_regex
+            })
         return cluster_objects
-# --- END OF FINAL REPLACEMENT ---
 
 
 async def get_ai_improved_regex(narrations: List[str], existing_regex: str = None, use_local_llm: bool = False) -> str:
@@ -743,24 +741,25 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
     
-    # Get client's regex patterns using the function we just refactored
     query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
     result = await db.execute(query)
     patterns = result.scalars().all()
     
     classified_transactions = []
-    unmatched_narrations = []
+    unmatched_transactions = [] # Changed from unmatched_narrations
     
-    # Ensure raw_data is a list of dicts
+    narration_col = statement.column_mapping.get("narration_column")
+    if not narration_col:
+        raise HTTPException(status_code=400, detail="Narration column not defined in mapping")
+
     raw_data = statement.raw_data if isinstance(statement.raw_data, list) else []
     for transaction in raw_data:
-        narration = str(transaction.get(statement.column_mapping.get("narration_column"), ""))
+        narration = str(transaction.get(narration_col, ""))
         
         matched = False
         for pattern in patterns:
             try:
                 if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
-                    # Create a copy to avoid modifying the original data
                     classified_transaction = transaction.copy()
                     classified_transaction["matched_ledger"] = pattern.ledger_name
                     classified_transaction["matched_pattern_id"] = pattern.id
@@ -768,30 +767,31 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
                     matched = True
                     break
             except re.error:
-                continue # Skip invalid regex patterns
+                continue
         
         if not matched:
+            # Still add to classified list but as 'Suspense'
             classified_transaction = transaction.copy()
             classified_transaction["matched_ledger"] = "Suspense"
             classified_transactions.append(classified_transaction)
-            if narration: # Only add non-empty narrations to the cluster list
-                unmatched_narrations.append(narration)
+            # Add the full transaction object to the unmatched list for clustering
+            if narration:
+                unmatched_transactions.append(transaction)
     
-    # Cluster unmatched narrations
-    clusters = await cluster_narrations(unmatched_narrations, db) if unmatched_narrations else []
+    # Cluster unmatched transactions
+    clusters = await cluster_narrations(unmatched_transactions, narration_col, db) if unmatched_transactions else []
     
-    # Update statement with processed data
     statement.processed_data = classified_transactions
     await db.commit()
     
     return {
         "classified_transactions": classified_transactions,
-        "unmatched_clusters": [cluster.dict() for cluster in clusters],
-        "total_transactions": len(classified_transactions),
-        "matched_transactions": len([t for t in classified_transactions if t["matched_ledger"] != "Suspense"]),
-        "unmatched_transactions": len(unmatched_narrations)
+        "unmatched_clusters": clusters, # No need for .dict() if returning dicts
+        "total_transactions": len(raw_data),
+        "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
+        "unmatched_transactions": len(unmatched_transactions)
     }
-# --- END OF REPLACEMENT ---
+
 @api_router.post("/ai-improve-regex")
 async def ai_improve_regex(request: AIRegexRequest):
     """Use AI to improve regex patterns"""
