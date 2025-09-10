@@ -221,8 +221,16 @@ class BankAccountModel(BankAccountBase):
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
     """Detect potential date columns"""
-    date_keywords = ['date', 'dt', 'txn_date', 'transaction_date', 'value_date']
-    return [h for h in headers if any(keyword in h.lower() for keyword in date_keywords)]
+    # --- REPLACEMENT for the return statement ---
+    normalized_headers = [h.lower().replace(" ", "").replace("_", "") for h in headers]
+    date_keywords = ['date', 'dt', 'txndate', 'transactiondate', 'valuedate'] # Also normalized
+
+    matched_headers = []
+    for i, normalized_header in enumerate(normalized_headers):
+        if any(keyword in normalized_header for keyword in date_keywords):
+            matched_headers.append(headers[i]) # Append the ORIGINAL header
+        
+    return matched_headers
 
 def detect_narration_columns(headers: List[str]) -> List[str]:
     """Detect potential narration/description columns"""
@@ -273,101 +281,123 @@ def suggest_column_mapping(headers: List[str]) -> Dict[str, str]:
     
     return mapping
 
-def generate_regex_from_narrations(narrations: List[str]) -> str:
-    """Generate regex pattern from similar narrations"""
+def extract_keywords(text: str, devalued_keywords: set) -> set:
+    """Extracts meaningful keywords from a narration string."""
+    # This logic is ported from your regex_generator_v_4_clear_input.html
+    tokens = re.split(r'[^A-Z0-9@]+', text.upper())
+    meaningful_tokens = set()
+    for token in tokens:
+        if (
+            token and
+            len(token) > 2 and
+            not re.match(r'\d{4,}', token) and
+            not token.isdigit() and
+            "**" not in token and
+            token not in devalued_keywords
+        ):
+            meaningful_tokens.add(token)
+    return meaningful_tokens
+
+async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession) -> str:
+    """Generate a precise regex pattern from narrations using common, meaningful keywords."""
     if not narrations:
         return ""
-    
-    # Find common patterns
-    word_counts = Counter()
-    for narration in narrations:
-        # Extract potential keywords (non-numeric, significant words)
-        words = re.findall(r'\b[A-Za-z]{3,}\b', narration.upper())
-        word_counts.update(words)
-    
-    # Get most common words
-    common_words = [word for word, count in word_counts.most_common(3) if count > 1]
-    
-    if common_words:
-        # Create regex with common words
-        pattern_parts = []
-        for word in common_words:
-            pattern_parts.append(f"(?=.*{re.escape(word)})")
-        
-        return "".join(pattern_parts) + ".*"
-    
-    # Fallback: use first few characters
-    if narrations:
-        first_narration = narrations[0]
-        # Extract first significant word
-        words = re.findall(r'\b[A-Za-z]{3,}\b', first_narration)
-        if words:
-            return f".*{re.escape(words[0])}.*"
-    
-    return ".*" + re.escape(narrations[0][:10]) + ".*"
 
-def cluster_narrations(narrations: List[str], n_clusters: int = None) -> List[TransactionCluster]:
-    """Cluster similar narrations using TF-IDF and K-means"""
+    # Fetch devalued keywords and convert to a set for fast lookups
+    result = await db.execute(select(models.DevaluedKeyword.keyword))
+    devalued_keywords_set = set(result.scalars().all())
+    
+    # Find keywords present in ALL narrations
+    keyword_sets = [extract_keywords(n, devalued_keywords_set) for n in narrations]
+    if not keyword_sets:
+        return ".*" # Fallback if no keywords are found
+
+    common_keywords = set.intersection(*keyword_sets)
+    
+    if common_keywords:
+        # Build the regex with word boundaries for precision
+        pattern = ".*".join(f"\\b{re.escape(k)}\\b" for k in sorted(list(common_keywords)))
+        return pattern
+    
+    # Fallback if there are no keywords common to ALL narrations
+    # We find the most frequent meaningful keyword from the first narration
+    first_narration_keywords = extract_keywords(narrations[0], devalued_keywords_set)
+    if first_narration_keywords:
+        return f"\\b{re.escape(sorted(list(first_narration_keywords))[0])}\\b"
+    
+    return ".*" # Final fallback
+# --- END OF REPLACEMENT ---
+
+# --- FINAL REPLACEMENT for cluster_narrations ---
+async def cluster_narrations(narrations: List[str], db: AsyncSession, n_clusters: int = None) -> List[TransactionCluster]:
+    """Cluster similar narrations using TF-IDF and K-means, ignoring devalued keywords."""
     if len(narrations) < 2:
         if narrations:
+            # This call also needs to be awaited and passed the db session
+            suggested_regex = await generate_regex_from_narrations(narrations, db)
             return [TransactionCluster(
                 cluster_id=str(uuid.uuid4()),
                 narrations=narrations,
-                suggested_regex=generate_regex_from_narrations(narrations),
+                suggested_regex=suggested_regex,
                 keyword_patterns=[],
                 confidence_score=0.5
             )]
         return []
-    
-    # TF-IDF vectorization
+
+    # ... (Fetching devalued keywords and vectorizer setup remains the same) ...
+    result = await db.execute(select(models.DevaluedKeyword.keyword))
+    devalued_keywords = result.scalars().all()
+    stop_words = list(devalued_keywords) + ['english']
     vectorizer = TfidfVectorizer(
-        stop_words='english',
+        stop_words=stop_words,
         max_features=100,
         ngram_range=(1, 2),
         lowercase=True
     )
-    
+
     try:
+        # ... (K-means logic is the same) ...
         tfidf_matrix = vectorizer.fit_transform(narrations)
-        
-        # Determine optimal number of clusters
         if n_clusters is None:
             n_clusters = min(max(2, len(narrations) // 5), 10)
         
-        # K-means clustering
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         cluster_labels = kmeans.fit_predict(tfidf_matrix)
         
-        # Group narrations by cluster
         clusters = defaultdict(list)
         for idx, label in enumerate(cluster_labels):
             clusters[label].append(narrations[idx])
         
-        # Create cluster objects
         cluster_objects = []
-        for cluster_id, cluster_narrations in clusters.items():
-            suggested_regex = generate_regex_from_narrations(cluster_narrations)
-            
+        for cluster_id, cluster_narrations_list in clusters.items():
+            # This call is correct
+            suggested_regex = await generate_regex_from_narrations(cluster_narrations_list, db)
             cluster_objects.append(TransactionCluster(
                 cluster_id=str(uuid.uuid4()),
-                narrations=cluster_narrations,
+                narrations=cluster_narrations_list,
                 suggested_regex=suggested_regex,
                 keyword_patterns=[],
-                confidence_score=0.7 if len(cluster_narrations) > 1 else 0.5
+                confidence_score=0.7 if len(cluster_narrations_list) > 1 else 0.5
             ))
-        
         return cluster_objects
     
     except Exception as e:
         logging.error(f"Clustering failed: {e}")
-        # Fallback: create individual clusters
-        return [TransactionCluster(
-            cluster_id=str(uuid.uuid4()),
-            narrations=[narration],
-            suggested_regex=generate_regex_from_narrations([narration]),
-            keyword_patterns=[],
-            confidence_score=0.3
-        ) for narration in narrations]
+        # --- CORRECTED FALLBACK LOGIC ---
+        # Fallback: create individual clusters using an async loop
+        cluster_objects = []
+        for narration in narrations:
+            suggested_regex = await generate_regex_from_narrations([narration], db)
+            cluster_objects.append(TransactionCluster(
+                cluster_id=str(uuid.uuid4()),
+                narrations=[narration],
+                suggested_regex=suggested_regex,
+                keyword_patterns=[],
+                confidence_score=0.3
+            ))
+        return cluster_objects
+# --- END OF FINAL REPLACEMENT ---
+
 
 async def get_ai_improved_regex(narrations: List[str], existing_regex: str = None, use_local_llm: bool = False) -> str:
     """Get AI-improved regex pattern"""
@@ -541,10 +571,9 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
         # --- START OF REPLACEMENT ---
         if file.filename.endswith('.csv'):
             # For CSV files, use read_csv with the index_col parameter
-            df = pd.read_csv(io.BytesIO(content), index_col=0)
+            df = pd.read_csv(io.BytesIO(content))
         else:
-            # For Excel files, use read_excel with the index_col parameter
-            df = pd.read_excel(io.BytesIO(content), index_col=0)
+            df = pd.read_excel(io.BytesIO(content))
         # --- END OF REPLACEMENT ---
         
         df = df.dropna(how='all').reset_index(drop=True)
@@ -683,7 +712,7 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
                 unmatched_narrations.append(narration)
     
     # Cluster unmatched narrations
-    clusters = cluster_narrations(unmatched_narrations) if unmatched_narrations else []
+    clusters = await cluster_narrations(unmatched_narrations, db) if unmatched_narrations else []
     
     # Update statement with processed data
     statement.processed_data = classified_transactions
@@ -805,6 +834,36 @@ async def get_statement(statement_id: str, db: AsyncSession = Depends(database.g
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
     return statement
+
+
+# Devalued Keyword Management
+class KeywordCreate(BaseModel):
+    keyword: str
+
+@api_router.get("/keywords", response_model=List[str])
+async def get_devalued_keywords(db: AsyncSession = Depends(database.get_db)):
+    """Get all devalued keywords"""
+    result = await db.execute(select(models.DevaluedKeyword.keyword).order_by(models.DevaluedKeyword.keyword))
+    return result.scalars().all()
+
+@api_router.post("/keywords")
+async def add_devalued_keyword(keyword_data: KeywordCreate, db: AsyncSession = Depends(database.get_db)):
+    """Add a new devalued keyword"""
+    keyword = keyword_data.keyword.upper().strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="Keyword cannot be empty")
+    
+    # Check if it already exists
+    exists = await db.scalar(select(models.DevaluedKeyword).where(models.DevaluedKeyword.keyword == keyword))
+    if exists:
+        raise HTTPException(status_code=400, detail="Keyword already exists")
+
+    db_keyword = models.DevaluedKeyword(keyword=keyword)
+    db.add(db_keyword)
+    await db.commit()
+    return {"message": "Keyword added successfully", "keyword": keyword}
+    
+# --- END OF NEW ENDPOINT BLOCK ---
 #Include any new endpoints above this line
 # Include the router in the main app
 app.include_router(api_router)

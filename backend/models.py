@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, DateTime, ForeignKey, JSON, Integer
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime, timezone
 import uuid
@@ -77,3 +77,10 @@ class BankAccount(Base):
     client_id = Column(String, ForeignKey('clients.id'), nullable=False)
     client = relationship("Client", back_populates="bank_accounts")
 # --- END OF NEW CLASS ---
+
+class DevaluedKeyword(Base):
+    __tablename__ = 'devalued_keywords'
+
+    id = Column(Integer, primary_key=True, index=True)
+    keyword = Column(String, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -881,59 +881,154 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
   );
 };
 
-// --- ADD THIS ENTIRE NEW COMPONENT ---
-// --- ADD THIS NEW ClusterCard COMPONENT ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated }) => {
+
+// --- DEFINITIVE REPLACEMENT for ClusterCard ---
+
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
+  const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [validation, setValidation] = useState({ 
+  matchStatus: 'none', // Can be 'all', 'partial', or 'none'
+  matchCount: 0,
+  highlightedNarrations: [] 
+  });  const [falsePositiveCount, setFalsePositiveCount] = useState(0);
+
+  // This single, clean useEffect hook handles all live validation.
+  useEffect(() => {
+    // Helper function to safely test a regex string.
+    const testSingleRegex = (regexStr, text) => {
+      // Safety check: if text is null or undefined, it can't match.
+      if (!text) return null;
+      try {
+        const re = new RegExp(regexStr, 'ui');
+        return text.match(re);
+      } catch (e) {
+        return null; // Invalid regex syntax
+      }
+    };
+    
+    // Helper function to safely highlight a match.
+    const highlightMatch = (regexStr, text) => {
+      // Safety check: Always return a valid object.
+      if (!text) return { html: '', matched: false };
+      
+      const match = testSingleRegex(regexStr, text);
+      if (!match || !match[0]) {
+        return { html: text.replace(/</g, '&lt;'), matched: false };
+      }
+      
+      const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
+      return { html: highlightedHtml, matched: true };
+    };
+
+    // --- False Positive Check Logic ---
+    let fpCount = 0;
+    if (editableRegex && otherNarrations) {
+      try {
+        const re = new RegExp(editableRegex, 'ui');
+        for (const other of otherNarrations) {
+          if (re.test(other)) {
+            fpCount++;
+          }
+        }
+      } catch (e) { /* Do nothing on invalid regex */ }
+    }
+    setFalsePositiveCount(fpCount);
+
+    // --- Main Validation Logic ---
+    // --- UPGRADED Main Validation Logic ---
+    const newHighlightedResults = cluster.narrations.map(n => highlightMatch(editableRegex, n));
+    const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
+
+    let status = 'none';
+    if (currentMatchCount === cluster.narrations.length) {
+      status = 'all';
+    } else if (currentMatchCount > 0) {
+      status = 'partial';
+    }
+
+    setValidation({
+      matchStatus: status, // Use the new status
+      matchCount: currentMatchCount, // Store the count
+      highlightedNarrations: newHighlightedResults.map(result => result.html)
+    });
+// --- END OF UPGRADE ---
+
+  }, [editableRegex, cluster.narrations, otherNarrations]);
 
   const handleCreateRule = async () => {
-    if (!ledgerName.trim()) {
-      toast.error("Ledger name is required.");
-      return;
-    }
+    if (!ledgerName.trim()) { toast.error("Ledger name is required."); return; }
+    try { new RegExp(editableRegex); } catch (e) { toast.error("Invalid Regex syntax."); return; }
+
     setLoading(true);
     try {
       const payload = {
         client_id: clientId,
         ledger_name: ledgerName,
-        regex_pattern: cluster.suggested_regex,
+        regex_pattern: editableRegex,
         sample_narrations: cluster.narrations,
       };
       await axios.post(`${API}/ledger-rules`, payload);
-      toast.success(`Rule for "${ledgerName}" created successfully!`);
-      onRuleCreated(); // Notify the parent component
-    } catch (error) {
-      toast.error("Failed to create rule.");
-    } finally {
-      setLoading(false);
-    }
+      toast.success(`Rule for "${ledgerName}" created!`);
+      onRuleCreated();
+    } catch (error) { toast.error("Failed to create rule."); } 
+    finally { setLoading(false); }
   };
 
   return (
     <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
-      <p className="text-sm font-semibold">Suggested Regex:</p>
-      <pre className="text-xs bg-slate-200 p-2 rounded-md overflow-x-auto">{cluster.suggested_regex}</pre>
+      <div className="flex justify-between items-center">
+        <p className="text-sm font-semibold">Define Regex Pattern</p>
+        <div className="flex items-center gap-2">
+          {(() => {
+            const percentage = Math.round((validation.matchCount / cluster.narrations.length) * 100);
+            switch (validation.matchStatus) {
+              case 'all':
+                return <span className="text-sm font-bold text-green-600">✔ All Match</span>;
+              case 'partial':
+                return <span className="text-sm font-bold text-yellow-600">Partial Match [{percentage}% captured]</span>;
+              default:
+                return <span className="text-sm font-bold text-red-600">✖ No Match</span>;
+            }
+          })()}
+        </div>
+      </div>
+      
+      <Textarea
+        className="font-mono text-xs bg-white"
+        value={editableRegex}
+        onChange={(e) => setEditableRegex(e.target.value)}
+      />
+
+      {falsePositiveCount > 0 && (
+        <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 flex-shrink-0" />
+          <div><span className="font-bold">Warning:</span> This pattern incorrectly matches <span className="font-extrabold">{falsePositiveCount}</span> other transaction(s).</div>
+        </div>
+      )}
+
       <p className="text-sm font-semibold">Sample Narrations ({cluster.narrations.length} items):</p>
-      <ScrollArea className="h-24 p-2 border rounded-md bg-white">
-        <ul className="text-xs list-disc pl-4 space-y-1">
-          {cluster.narrations.map((n, i) => <li key={i} className="truncate">{n}</li>)}
-        </ul>
+      
+      <ScrollArea className="h-32 p-2 border rounded-md bg-white">
+        <div className="text-xs space-y-1">
+          {validation.highlightedNarrations.map((html, i) => <div key={i} className="truncate" dangerouslySetInnerHTML={{ __html: html }} />)}
+        </div>
       </ScrollArea>
+      
       <div className="flex items-center gap-4 pt-2">
-        <Input 
-          placeholder="Enter Ledger Name..." 
-          value={ledgerName}
-          onChange={(e) => setLedgerName(e.target.value)}
-        />
-        <Button onClick={handleCreateRule} disabled={loading}>
-          <Plus className="w-4 h-4 mr-2" />
-          {loading ? 'Creating...' : 'Create Rule'}
+        <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
+        <Button onClick={handleCreateRule} 
+            disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0}>
+          <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
       </div>
     </div>
   );
 };
+// --- END OF DEFINITIVE REPLACEMENT ---
+// --- END OF REPLACEMENT ---
 
 // --- ADD THIS ENTIRE NEW COMPONENT ---
 
@@ -1001,8 +1096,8 @@ const StatementDetailsPage = () => {
   const [classifying, setClassifying] = useState(false);
 
   
-// --- SIMPLIFIED runClassification ---
-const runClassification = useCallback(async () => {
+  // --- SIMPLIFIED runClassification ---
+  const runClassification = useCallback(async () => {
   setClassifying(true);
   try {
     const response = await axios.post(`${API}/classify-transactions/${statementId}`);
@@ -1013,11 +1108,10 @@ const runClassification = useCallback(async () => {
   } finally {
     setClassifying(false);
   }
-}, [statementId]);
-// --- END OF REPLACEMENT ---
-  // --- ADD this new handler function ---
+  }, [statementId]);
+
   // --- SIMPLIFIED handleFlagAsIncorrect ---
-const handleFlagAsIncorrect = (transactionToFlag) => {
+  const handleFlagAsIncorrect = (transactionToFlag) => {
   setClassificationResult(prevResult => {
     if (!prevResult) return null;
 
@@ -1032,7 +1126,7 @@ const handleFlagAsIncorrect = (transactionToFlag) => {
       narrations: [transactionToFlag.Description],
       suggested_regex: `.*${transactionToFlag.Description.split(/[^A-Za-z0-9]/).filter(Boolean)[0]}.*`,
     };
-
+    
     // 3. Return the new, complete state object
     return {
       ...prevResult,
@@ -1041,9 +1135,12 @@ const handleFlagAsIncorrect = (transactionToFlag) => {
     };
   });
   toast.info("Transaction moved to 'Unmatched' for re-classification.");
-};
-// --- END OF NEW HANDLER ---
-useEffect(() => {
+  };
+  // --- END OF REPLACEMENT ---
+  // --- ADD this new handler function ---
+
+  // --- END OF NEW HANDLER ---
+  useEffect(() => {
   const fetchStatement = async () => {
     setLoading(true);
     try {
@@ -1057,18 +1154,26 @@ useEffect(() => {
     }
   };
   fetchStatement();
-}, [statementId]); // This effect only runs when the statementId changes
+  }, [statementId]); // This effect only runs when the statementId changes
 
-// Effect 2: Run the classification ONLY when the statement has been successfully fetched.
-useEffect(() => {
+  // Effect 2: Run the classification ONLY when the statement has been successfully fetched.
+  useEffect(() => {
   if (statement) {
     // We wrap runClassification in an async IIFE to handle the final setLoading
     (async () => {
       await runClassification();
       setLoading(false); // Turn off the main loading indicator AFTER classification is done
     })();
-  }
-}, [statement, runClassification]); // Dependency array is correct
+    }
+  }, [statement, runClassification]); // Dependency array is correct
+  // --- ADD THIS LOGIC inside StatementDetailsPage, before the return statement ---
+  const otherNarrations = useMemo(() => {
+        if (!classificationResult) return [];
+        // Get all narrations from transactions that were already successfully matched.
+        return classificationResult.classified_transactions
+            .filter(t => t.matched_ledger !== 'Suspense')
+            .map(t => t.Description);
+    }, [classificationResult]);
 
   if (loading || !classificationResult) {
     return <div>Loading classification results...</div>;
@@ -1105,7 +1210,8 @@ useEffect(() => {
                 key={cluster.cluster_id} 
                 cluster={cluster} 
                 clientId={statement.client_id}
-                onRuleCreated={runClassification} // This passes the "Re-classify" function to the card
+                onRuleCreated={runClassification}
+                otherNarrations={otherNarrations} // Pass the new prop down
               />
             ))
             // --- END OF NEW REPLACEMENT ---
