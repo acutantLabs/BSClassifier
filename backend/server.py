@@ -374,10 +374,14 @@ async def cluster_narrations(
         if n_clusters is None:
             # Adjust clustering for smaller sample sizes
             num_samples = len(transactions)
-            if num_samples <= 5:
-                n_clusters = num_samples
-            else:
-                 n_clusters = min(max(2, num_samples // 5), 10)
+        if n_clusters is None:
+            if num_samples <= 5: # If 5 or fewer items, make each its own small cluster or group them tightly
+                n_clusters = num_samples 
+            else: # For larger groups, use the existing logic
+                n_clusters = min(max(2, num_samples // 5), 10)
+        # Ensure n_clusters is not zero if there are samples
+        if num_samples > 0 and n_clusters == 0:
+            n_clusters = 1
         
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
         cluster_labels = kmeans.fit_predict(tfidf_matrix)
@@ -738,9 +742,31 @@ async def create_ledger_rule(rule_data: LedgerRuleBase, db: AsyncSession = Depen
         db.add(db_rule)
         await db.commit()
         await db.refresh(db_rule)
+        # --- START OF ADDITION ---
+        # Now, create and save the corresponding feedback entry.
+        feedback_entry = models.ClassificationFeedback(
+            client_id=db_rule.client_id,
+            ledger_name=db_rule.ledger_name,
+            source_narrations=db_rule.sample_narrations,
+            regex_pattern=rule_data.regex_pattern # Store the regex directly
+        )
+        # 3. Add both objects to the session.
+        db.add(db_rule)
+        db.add(feedback_entry)
+    
+        try:
+            # 4. Commit the session ONCE to save both objects atomically.
+            await db.commit()
+        except Exception as e:
+            # If anything fails, roll back both changes.
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+        # 5. Refresh the rule object to load its generated ID and timestamps.
+        await db.refresh(db_rule)
         
+        # 6. Return the rule object. The session is still active, so no error will occur.
         return db_rule
-# --- END OF REPLACEMENT ---
 
 # --- REPLACEMENT for get_client_regex_patterns ---
 @api_router.get("/ledger-rules/{client_id}", response_model=List[LedgerRule])
@@ -756,10 +782,10 @@ async def get_client_ledger_rules(client_id: str, db: AsyncSession = Depends(dat
 
 # Transaction Classification
 
-# --- REPLACEMENT for classify_transactions ---
+# --- REPLACEMENT for the entire classify_transactions function ---
 @api_router.post("/classify-transactions/{statement_id}")
 async def classify_transactions(statement_id: str, db: AsyncSession = Depends(database.get_db)):
-    """Classify transactions using existing regex patterns"""
+    """Classify transactions using existing regex patterns and cluster unmatched ones."""
     statement = await db.get(models.BankStatement, statement_id)
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
@@ -769,11 +795,12 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
     patterns = result.scalars().all()
     
     classified_transactions = []
-    unmatched_transactions = [] # Changed from unmatched_narrations
+    unmatched_transactions = []
     
     narration_col = statement.column_mapping.get("narration_column")
-    if not narration_col:
-        raise HTTPException(status_code=400, detail="Narration column not defined in mapping")
+    crdr_column = statement.column_mapping.get("crdr_column")
+    if not narration_col or not crdr_column:
+        raise HTTPException(status_code=400, detail="Narration or CR/DR column not defined in mapping")
 
     raw_data = statement.raw_data if isinstance(statement.raw_data, list) else []
     for transaction in raw_data:
@@ -793,23 +820,43 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
                 continue
         
         if not matched:
-            # Still add to classified list but as 'Suspense'
             classified_transaction = transaction.copy()
             classified_transaction["matched_ledger"] = "Suspense"
             classified_transactions.append(classified_transaction)
-            # Add the full transaction object to the unmatched list for clustering
             if narration:
                 unmatched_transactions.append(transaction)
     
-    # Cluster unmatched transactions
-    clusters = await cluster_narrations(unmatched_transactions, narration_col, db) if unmatched_transactions else []
+    # --- START OF NEW CLUSTERING ORCHESTRATION ---
+    
+    # 1. Segregate unmatched transactions by CR/DR type
+    debit_transactions = []
+    credit_transactions = []
+    for t in unmatched_transactions:
+        raw_cr_dr = t.get(crdr_column)
+        clean_cr_dr = ""
+        if isinstance(raw_cr_dr, str):
+            clean_cr_dr = raw_cr_dr.strip().replace(".", "").upper()
+        
+        if clean_cr_dr == "DR":
+            debit_transactions.append(t)
+        elif clean_cr_dr == "CR":
+            credit_transactions.append(t)
+
+    # 2. Cluster each group independently
+    debit_clusters = await cluster_narrations(debit_transactions, narration_col, db)
+    credit_clusters = await cluster_narrations(credit_transactions, narration_col, db)
+    
+    # 3. Combine the results
+    final_clusters = debit_clusters + credit_clusters
+    
+    # --- END OF NEW CLUSTERING ORCHESTRATION ---
     
     statement.processed_data = classified_transactions
     await db.commit()
     
     return {
         "classified_transactions": classified_transactions,
-        "unmatched_clusters": clusters, # No need for .dict() if returning dicts
+        "unmatched_clusters": final_clusters,
         "total_transactions": len(raw_data),
         "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
         "unmatched_transactions": len(unmatched_transactions)

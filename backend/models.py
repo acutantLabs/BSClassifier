@@ -37,6 +37,31 @@ class LedgerRule(Base):
     client = relationship("Client", back_populates="ledger_rules")
 
     # --- ADD THIS CLASS to models.py ---
+
+# --- ADD THIS ENTIRE NEW CLASS DEFINITION ---
+class ClassificationFeedback(Base):
+    """
+    Stores a historical record of successful clustering and classification events
+    to be used as training data for future ML models.
+    """
+    __tablename__ = 'classification_feedback'
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    client_id = Column(String, ForeignKey('clients.id'), nullable=False)
+    ledger_name = Column(String, nullable=False)
+    
+    # This stores the list of narrations that the user confirmed belonged together.
+    source_narrations = Column(JSON, nullable=False)
+    regex_pattern = Column(String, nullable=False)
+
+    # Link this feedback event to the specific rule that was created from it.
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # Define relationships for SQLAlchemy to use
+    client = relationship("Client")
+# --- END OF ADDITION ---
+
 class TempFile(Base):
     __tablename__ = 'temp_files'
 
