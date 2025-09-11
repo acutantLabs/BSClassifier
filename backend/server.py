@@ -677,7 +677,7 @@ def normalize_transaction_data(
 
 # --- REPLACEMENT for confirm_column_mapping ---
 @api_router.post("/confirm-mapping/{file_id}")
-async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id: str = Query(...), db: AsyncSession = Depends(database.get_db)):
+async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id: str = Query(...), bank_account_id: str = Query(...), db: AsyncSession = Depends(database.get_db)):
     """Confirm column mapping and process statement"""
     temp_file = await db.get(models.TempFile, file_id)
     if not temp_file:
@@ -702,6 +702,7 @@ async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id
         # Create a permanent BankStatement record
         statement = models.BankStatement(
             client_id=client_id,
+            bank_account_id=bank_account_id,
             filename=temp_file.filename,
             column_mapping=final_mapping,  # Use the potentially updated mapping
             statement_format=mapping.statement_format,

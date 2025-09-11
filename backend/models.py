@@ -52,6 +52,7 @@ class BankStatement(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     client_id = Column(String, ForeignKey('clients.id'), nullable=False)
+    bank_account_id = Column(String, ForeignKey('bank_accounts.id'), nullable=True)
     filename = Column(String, nullable=False)
     upload_date = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     column_mapping = Column(JSON, nullable=False)
@@ -60,6 +61,8 @@ class BankStatement(Base):
     processed_data = Column(JSON, nullable=True)
 
     client = relationship("Client")
+    bank_account = relationship("BankAccount")
+
 
 class BankAccount(Base):
     __tablename__ = 'bank_accounts'
