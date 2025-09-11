@@ -1001,8 +1001,21 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
     finally { setLoading(false); }
   };
 
-  const formatCurrency = (amount) => { /* ... unchanged ... */ };
-
+const formatCurrency = (amount) => {
+    // Guard against null or undefined values
+    if (amount === null || typeof amount === 'undefined') {
+      return '';
+    }
+    
+    // THE FIX: Convert the input to a string and remove all commas
+    const cleanedAmount = String(amount).replace(/,/g, '');
+    
+    // Convert the clean string to a number
+    const num = Number(cleanedAmount);
+    
+    // If it's not a valid number, return nothing. Otherwise, format it as Indian Rupees.
+    return isNaN(num) ? '' : `₹${num.toLocaleString('en-IN')}`;
+  };
   return (
     <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
       <div className="flex justify-between items-center">
