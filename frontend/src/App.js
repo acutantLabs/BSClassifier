@@ -1059,7 +1059,7 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach }) => {
   console.log("Data for this cluster:", cluster.transactions);
 
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
@@ -1070,7 +1070,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations }) => {
   const [validation, setValidation] = useState({ 
     matchStatus: 'none', // 'all', 'partial', or 'none'
     matchCount: 0,
-    highlightedNarrations: cluster.transactions.map(t => t.Description) // Start with plain text
+    highlightedNarrations: [] // Start with plain text
   });
   
   // State specifically for the false positive warning
@@ -1237,8 +1237,24 @@ const formatCurrency = (amount) => {
             // --- END OF NEW CODE ---
 
             return (
-              <div key={i} className="flex items-center justify-between gap-2 p-1">
-                <div className="truncate" dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} />
+              <div key={i} className="flex items-center justify-between gap-2 p-1 group">
+                {/* --- START: ADD THE DETACH BUTTON --- */}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="w-6 h-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                  onClick={() => onDetach(transaction, cluster.cluster_id)}
+                  title="Detach from cluster"
+                >
+                  <X className="w-3 h-3 text-slate-500" />
+                </Button>
+                {/* --- END: ADD THE DETACH BUTTON --- */}
+
+                <div 
+                  className="truncate flex-grow" 
+                  dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} 
+                />
+                
                 <div className="flex items-center gap-2 flex-shrink-0">
                   
                   {/* --- MODIFIED: The CR/DR Badge --- */}
@@ -1344,6 +1360,7 @@ const StatementDetailsPage = () => {
   const [classifying, setClassifying] = useState(false);
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
   const [voucherData, setVoucherData] = useState(null);
+  const [detachedTransactions, setDetachedTransactions] = useState([]);
 
   
   // --- SIMPLIFIED runClassification ---
@@ -1408,7 +1425,39 @@ const StatementDetailsPage = () => {
       setClassifying(false);
     }
   };
-  // --- END OF ADDITION ---
+  const handleDetachTransaction = (transactionToDetach, sourceClusterId) => {
+    setClassificationResult(prevResult => {
+      // Guard against cases where there's no data
+      if (!prevResult) return null;
+
+      const newClusters = prevResult.unmatched_clusters.map(cluster => {
+        // Find the cluster that the transaction is coming from
+        if (cluster.cluster_id === sourceClusterId) {
+          // Return a new cluster object with the transaction filtered out
+          return {
+            ...cluster,
+            // Replace the incorrect id() call with a direct reference check.
+            transactions: cluster.transactions.filter(
+              t => t !== transactionToDetach 
+            ),
+          };
+        }
+        // Leave other clusters unchanged
+        return cluster;
+      }).filter(cluster => cluster.transactions.length > 0); // Remove any clusters that are now empty
+
+      // Update the main classification result state
+      return {
+        ...prevResult,
+        unmatched_clusters: newClusters,
+      };
+    });
+
+    // Add the detached transaction to our "holding pen" state
+    setDetachedTransactions(prevDetached => [...prevDetached, transactionToDetach]);
+
+    toast.info("Transaction detached from cluster.");
+  };
   // --- END OF NEW HANDLER ---
   useEffect(() => {
   const fetchStatement = async () => {
@@ -1489,6 +1538,7 @@ const StatementDetailsPage = () => {
                 clientId={statement.client_id}
                 onRuleCreated={runClassification}
                 otherNarrations={otherNarrations} // Pass the new prop down
+                onDetach={handleDetachTransaction}
               />
             ))
             // --- END OF NEW REPLACEMENT ---
@@ -1497,7 +1547,35 @@ const StatementDetailsPage = () => {
           )}
         </CardContent>
       </Card>
-      
+      {/* --- START: ADD THIS ENTIRE JSX BLOCK --- */}
+      {detachedTransactions.length > 0 && (
+        <Card className="border-0 shadow-sm bg-yellow-50 border-yellow-200">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Filter className="w-5 h-5 text-yellow-700" />
+              Detached Transactions for Re-Clustering
+            </CardTitle>
+            <CardDescription>
+              These transactions have been removed from their clusters. You can create rules for them individually or re-cluster them.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* We will reuse the ClusterCard to display these, as it's already styled nicely */}
+            <ClusterCard
+                cluster={{
+                    cluster_id: 'detached-group',
+                    transactions: detachedTransactions,
+                    suggested_regex: '' // No suggestion for this mixed group
+                }}
+                clientId={statement.client_id}
+                onRuleCreated={runClassification} // You can still create a rule from a single detached item
+                otherNarrations={otherNarrations}
+                onDetach={() => {}} // Detaching from this group does nothing
+            />
+          </CardContent>
+        </Card>
+      )}
+      {/* --- END: ADD THIS ENTIRE JSX BLOCK --- */}
       {/* Classified Transactions Table Section */}
       <Card className="border-0 shadow-sm">
         <CardHeader>
