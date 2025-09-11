@@ -592,6 +592,9 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
             df = pd.read_excel(io.BytesIO(content))
         # --- END OF REPLACEMENT ---
         df = df.loc[:, ~df.columns.str.startswith('Unnamed:')]
+        # Convert all data types in the DataFrame to strings to ensure JSON compatibility.
+
+        df = df.astype(str)
 
         df = df.dropna(how='all').reset_index(drop=True)
         headers = df.columns.tolist()
