@@ -66,14 +66,7 @@ const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
     const amount = parseFloat(String(t[amountColumn] || '0').replace(/,/g, ''));
 
     // Format the date to DD/MM/YYYY
-    let formattedDate = '';
-    try {
-        // Use a simple method to reformat the date string if it's valid
-        const dateObj = new Date(t[dateColumn].split(' ')[0].split('/').reverse().join('-'));
-        if (!isNaN(dateObj)) {
-            formattedDate = dateObj.toLocaleDateString('en-GB'); // en-GB gives DD/MM/YYYY
-        }
-    } catch (e) { /* leave formattedDate empty on error */ }
+    const formattedDate = (t[dateColumn] || '').split(' ')[0];
 
     // --- Line 1: The Party Ledger Entry ---
     const partyLedger = t.matched_ledger || 'Suspense';
@@ -1234,24 +1227,41 @@ const formatCurrency = (amount) => {
       <p className="text-sm font-semibold">Sample Transactions ({cluster.transactions.length} items):</p>
       
       {/* --- THIS IS THE RESTORED NARRATION HIGHLIGHTING --- */}
+      {/* --- START OF REPLACEMENT BLOCK --- */}
       <ScrollArea className="h-32 p-2 border rounded-md bg-white">
-        <div className="text-xs space-y-1 font-mono">
-          {validation.highlightedNarrations.map((html, i) => (
-            <div key={i} className="flex items-center justify-between gap-2 p-1">
-               <div className="truncate" dangerouslySetInnerHTML={{ __html: html }} />
-               {/* Display tags for the corresponding original transaction */}
-               <div className="flex items-center gap-2 flex-shrink-0">
-                <Badge variant={cluster.transactions[i]['CR/DR'] === 'CR' ? 'default' : 'destructive'} className="h-5">
-                  {cluster.transactions[i]['CR/DR']}
-                </Badge>
-                <Badge variant="outline">
-                  {formatCurrency(cluster.transactions[i]['Amount (INR)'])}
-                </Badge>
+        <div className="text-xs space-y-2">
+          {cluster.transactions.map((transaction, i) => {
+            // --- NEW: Robust check for credit status ---
+            const rawCrDr = transaction['CR/DR'] || '';
+            const isCredit = rawCrDr.trim().replace(/\./g, '').toUpperCase() === 'CR';
+            // --- END OF NEW CODE ---
+
+            return (
+              <div key={i} className="flex items-center justify-between gap-2 p-1">
+                <div className="truncate" dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} />
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  
+                  {/* --- MODIFIED: The CR/DR Badge --- */}
+                  <Badge 
+                    className={`h-5 font-semibold ${isCredit 
+                      ? 'bg-green-100 text-green-800 border-green-200' 
+                      : 'bg-red-100 text-red-800 border-red-200'}`}
+                  >
+                    {isCredit ? 'Credit' : 'Debit'}
+                  </Badge>
+                  {/* --- END OF MODIFICATION --- */}
+                  
+                  <Badge variant="outline" className="font-mono">
+                    {formatCurrency(transaction['Amount (INR)'])}
+                  </Badge>
+
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </ScrollArea>
+      {/* --- END OF REPLACEMENT BLOCK --- */}
       
       <div className="flex items-center gap-4 pt-2">
         <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
