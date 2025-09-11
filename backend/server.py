@@ -84,6 +84,9 @@ class ClientCreate(ClientBase):
     """The model used when CREATING a new client via the API."""
     pass
 
+class UpdateTransactionsRequest(BaseModel):
+    processed_data: List[Dict[str, Any]]
+
 class ClientUpdate(ClientBase):
     """Model used for updating an existing client's name."""
     pass
@@ -807,6 +810,100 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
         "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
         "unmatched_transactions": len(unmatched_transactions)
     }
+# In server.py, after the classify_transactions function
+
+# --- ADD THIS ENTIRE ENDPOINT ---
+@api_router.post("/statements/{statement_id}/update-transactions")
+async def update_transactions(statement_id: str, request: UpdateTransactionsRequest, db: AsyncSession = Depends(database.get_db)):
+    """Updates the processed_data for a given statement."""
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    
+    statement.processed_data = request.processed_data
+    await db.commit()
+    
+    return {"message": "Transactions updated successfully"}
+# --- END OF ADDITION ---
+# --- ADD THIS ENTIRE ENDPOINT ---
+
+# --- REPLACEMENT for the entire generate_vouchers function ---
+@api_router.post("/generate-vouchers/{statement_id}")
+async def generate_vouchers(statement_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Sorts transactions and generates data for Tally vouchers."""
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    if not statement.bank_account_id:
+        raise HTTPException(status_code=400, detail="Statement is not linked to a bank account. Please re-upload.")
+
+    bank_account = await db.get(models.BankAccount, statement.bank_account_id)
+    if not bank_account:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+
+    client = await db.get(models.Client, statement.client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    processed_data = statement.processed_data if statement.processed_data else []
+    contra_list = set(bank_account.contra_list or [])
+    bank_ledger_name = bank_account.ledger_name
+    
+    crdr_column = statement.column_mapping.get("crdr_column")
+    date_column = statement.column_mapping.get("date_column")
+
+    receipt_vouchers, payment_vouchers, contra_vouchers = [], [], []
+    first_date = None
+
+    for transaction in processed_data:
+        # --- START: ROBUST CR/DR CHECK ---
+        raw_cr_dr = transaction.get(crdr_column)
+        
+        # Clean the string to handle variations like "Cr.", " cr ", "CR", etc.
+        clean_cr_dr = ""
+        if isinstance(raw_cr_dr, str):
+            clean_cr_dr = raw_cr_dr.strip().replace(".", "").upper()
+        # --- END: ROBUST CR/DR CHECK ---
+
+        ledger = transaction.get("matched_ledger", "Suspense")
+        
+        if not first_date:
+            try:
+                date_str = transaction.get(date_column)
+                if date_str:
+                    # Optional cleanup: removed deprecated 'infer_datetime_format'
+                    first_date = pd.to_datetime(date_str, dayfirst=True)
+            except Exception:
+                pass
+
+        # Use the cleaned string for comparison
+        if clean_cr_dr == "CR":
+            receipt_vouchers.append(transaction)
+        elif clean_cr_dr == "DR":
+            if ledger in contra_list:
+                contra_vouchers.append(transaction)
+            else:
+                payment_vouchers.append(transaction)
+
+    month_year = first_date.strftime("%B_%Y") if first_date else "vouchers"
+    sanitized_ledger_name = bank_ledger_name.replace("/", "_").replace("\\", "_")
+    suggested_filename = f"{client.name}_{sanitized_ledger_name}_{month_year}.csv"
+
+    # --- START: MODERN Pydantic USAGE ---
+    # Use model_validate (replaces from_orm)
+    pydantic_statement = BankStatement.model_validate(statement)
+    # --- END: MODERN Pydantic USAGE ---
+
+    return {
+        "receipt_vouchers": receipt_vouchers,
+        "payment_vouchers": payment_vouchers,
+        "contra_vouchers": contra_vouchers,
+        "suggested_filename": suggested_filename,
+        # Use model_dump (replaces dict)
+        "statement_details": pydantic_statement.model_dump(),
+        "bank_ledger_name": bank_ledger_name,
+    }
+
 
 @api_router.post("/ai-improve-regex")
 async def ai_improve_regex(request: AIRegexRequest):

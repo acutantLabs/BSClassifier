@@ -287,7 +287,9 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
   const [mapping, setMapping] = useState({});
   const [statementFormat, setStatementFormat] = useState('single_amount_crdr');
   const [loading, setLoading] = useState(false);
-  
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [selectedBankAccount, setSelectedBankAccount] = useState('');
+
   // useMemo will re-calculate this data only when fileData changes
   const previewData = useMemo(() => {
   if (!fileData) {
@@ -324,9 +326,32 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
     }
   }, [fileData]);
 
+  useEffect(() => {
+    const fetchBankAccounts = async () => {
+      if (!selectedClient) {
+        setBankAccounts([]);
+        setSelectedBankAccount('');
+        return;
+      }
+      try {
+        const response = await axios.get(`${API}/clients/${selectedClient}/bank-accounts`);
+        setBankAccounts(response.data);
+      } catch (error) {
+        toast.error("Failed to fetch bank accounts for client.");
+        setBankAccounts([]);
+      }
+    };
+    fetchBankAccounts();
+  }, [selectedClient]);
+
   const handleConfirmMapping = async () => {
     if (!selectedClient) {
       toast.error('Please select a client');
+      return;
+    }
+
+    if (!selectedBankAccount) {
+      toast.error('Please select a bank account');
       return;
     }
 
@@ -347,7 +372,7 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
       };
 
       const response = await axios.post(
-        `${API}/confirm-mapping/${fileData.file_id}?client_id=${selectedClient}`,
+        `${API}/confirm-mapping/${fileData.file_id}?client_id=${selectedClient}&bank_account_id=${selectedBankAccount}`,
         mappingData
       );
       
@@ -364,10 +389,10 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
   };
 
   if (!isOpen || !fileData) return null;
-
+  //Change Upload statement modal size here
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-6xl max-h-[90vh] overflow-hidden">
+      <DialogContent className="max-w-6xl max-h-[98vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-2xl font-bold flex items-center">
             <FileSpreadsheet className="w-6 h-6 mr-2 text-blue-500" />
@@ -395,6 +420,27 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
               </SelectContent>
             </Select>
           </div>
+          {/* --- ADD THIS ENTIRE JSX BLOCK --- */}
+          <div className="space-y-2">
+            <Label>Select Bank Account</Label>
+            <Select 
+              value={selectedBankAccount} 
+              onValueChange={setSelectedBankAccount}
+              disabled={!selectedClient || bankAccounts.length === 0}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="First, select a client" />
+              </SelectTrigger>
+              <SelectContent>
+                {bankAccounts.map(account => (
+                  <SelectItem key={account.id} value={account.id}>
+                    {account.ledger_name} ({account.bank_name})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {/* --- END OF ADDITION --- */}
 
           {/* Statement Format Selection */}
           <div className="space-y-4">
