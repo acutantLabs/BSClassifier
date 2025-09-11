@@ -3,6 +3,8 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from pathlib import Path
 from sqlalchemy import select, func, outerjoin
+from typing import List, Dict, Optional, Any, Union, Tuple
+
 
 
 ROOT_DIR = Path(__file__).parent
@@ -346,6 +348,66 @@ async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession
     # This is a final fallback, which should now be rarely needed.
     return f".*\\b{re.escape(sorted(list(common_keywords))[0])}\\b.*"
 
+# In server.py
+
+# --- ADD THIS ENTIRE NEW HELPER FUNCTION ---
+# --- DEFINITIVE REPLACEMENT for pre_cluster_by_shared_keywords ---
+async def pre_cluster_by_shared_keywords(
+    transactions: List[Dict[str, Any]], narration_column: str, db: AsyncSession
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: # <-- FIX 1: Correct type hint syntax
+    """
+    Finds high-confidence clusters based on shared keywords, ensuring no duplicates.
+    Returns a tuple of (found_clusters, remaining_transactions).
+    """
+    result = await db.execute(select(models.DevaluedKeyword.keyword))
+    devalued_keywords_set = set(result.scalars().all())
+    
+    keyword_map = defaultdict(list)
+    for transaction in transactions:
+        narration = str(transaction.get(narration_column, ""))
+        keywords = extract_keywords(narration, devalued_keywords_set)
+        for keyword in keywords:
+            keyword_map[keyword].append(transaction)
+            
+    potential_clusters = []
+    for keyword, mapped_transactions in keyword_map.items():
+        if len(mapped_transactions) >= 2:
+            potential_clusters.append(mapped_transactions)
+            
+    # Prioritize larger potential clusters first
+    sorted_clusters = sorted(potential_clusters, key=len, reverse=True)
+    
+    final_clusters = []
+    # --- FIX 2: Track using in-memory object ID, not the 'Srl' key ---
+    processed_ids = set() 
+    
+    for cluster_group in sorted_clusters:
+        # Filter out any transactions that have already been claimed by a larger cluster
+        unclaimed_transactions = [
+            t for t in cluster_group if id(t) not in processed_ids
+        ]
+        
+        if len(unclaimed_transactions) >= 2:
+            narrations = [str(t.get(narration_column, "")) for t in unclaimed_transactions]
+            suggested_regex = await generate_regex_from_narrations(narrations, db)
+            
+            final_clusters.append({
+                "cluster_id": str(uuid.uuid4()),
+                "transactions": unclaimed_transactions,
+                "suggested_regex": suggested_regex,
+            })
+            
+            # Add the memory IDs of these transactions to the set so they can't be reused
+            for t in unclaimed_transactions:
+                processed_ids.add(id(t))
+
+    # The remaining transactions are those whose memory IDs were never processed
+    remaining_transactions = [
+        t for t in transactions if id(t) not in processed_ids
+    ]
+    
+    return final_clusters, remaining_transactions
+# --- END OF REPLACEMENT ---
 # --- FINAL REPLACEMENT for cluster_narrations ---
 async def cluster_narrations(
     transactions: List[Dict[str, Any]], narration_column: str, db: AsyncSession, n_clusters: int = None
@@ -827,7 +889,11 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
                 unmatched_transactions.append(transaction)
     
     # --- START OF NEW CLUSTERING ORCHESTRATION ---
-    
+    pre_clusters, remaining_transactions = await pre_cluster_by_shared_keywords(
+        unmatched_transactions, narration_col, db
+    )
+
+
     # 1. Segregate unmatched transactions by CR/DR type
     debit_transactions = []
     credit_transactions = []
@@ -847,7 +913,7 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
     credit_clusters = await cluster_narrations(credit_transactions, narration_col, db)
     
     # 3. Combine the results
-    final_clusters = debit_clusters + credit_clusters
+    final_clusters = pre_clusters + debit_clusters + credit_clusters
     
     # --- END OF NEW CLUSTERING ORCHESTRATION ---
     
