@@ -591,7 +591,8 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
         else:
             df = pd.read_excel(io.BytesIO(content))
         # --- END OF REPLACEMENT ---
-        
+        df = df.loc[:, ~df.columns.str.startswith('Unnamed:')]
+
         df = df.dropna(how='all').reset_index(drop=True)
         headers = df.columns.tolist()
         preview_data = df.head(10).fillna('').to_dict('records')

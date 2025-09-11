@@ -40,6 +40,142 @@ import {
   Zap
 } from 'lucide-react';
 
+
+// --- ADD THIS ENTIRE HELPER FUNCTION ---
+const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
+  // Define the exact headers Tally expects
+  const headers = [
+    "Voucher Date", "Voucher Type Name", "Voucher Number", "Buyer/Supplier - Address",
+    "Buyer/Supplier - Pincode", "Ledger Name", "Ledger Amount", "Ledger Amount Dr/Cr",
+    "Item Name", "Billed Quantity", "Item Rate", "Item Rate per", "Item Amount",
+    "Change Mode", "Voucher Narration"
+  ].join(',');
+
+  // Get the correct column names from the statement's mapping
+  const dateColumn = statement.column_mapping.date_column;
+  const amountColumn = statement.column_mapping.amount_column;
+  const narrationColumn = statement.column_mapping.narration_column;
+
+  let voucherNumber = 1;
+
+  const rows = vouchers.map(t => {
+    const voucherType = t.voucher_type; // This is a temporary key we'll add
+    const isContra = voucherType === 'Contra';
+    
+    // Clean and parse the amount safely
+    const amount = parseFloat(String(t[amountColumn] || '0').replace(/,/g, ''));
+
+    // Format the date to DD/MM/YYYY
+    let formattedDate = '';
+    try {
+        // Use a simple method to reformat the date string if it's valid
+        const dateObj = new Date(t[dateColumn].split(' ')[0].split('/').reverse().join('-'));
+        if (!isNaN(dateObj)) {
+            formattedDate = dateObj.toLocaleDateString('en-GB'); // en-GB gives DD/MM/YYYY
+        }
+    } catch (e) { /* leave formattedDate empty on error */ }
+
+    // --- Line 1: The Party Ledger Entry ---
+    const partyLedger = t.matched_ledger || 'Suspense';
+    const partyCrDr = isContra ? 'Dr' : (voucherType === 'Receipt' ? 'Cr' : 'Dr');
+    const line1 = [
+        `"${formattedDate}"`, `"${voucherType}"`, `"${voucherNumber}"`, '""',
+        '""', `"${partyLedger}"`, `"${amount.toFixed(2)}"`, `"${partyCrDr}"`,
+        '""', '""', '""', '""', '""',
+        '""', `"${(t[narrationColumn] || '').replace(/"/g, '""')}"` // Escape double quotes
+    ].join(',');
+    
+    // --- Line 2: The Bank Ledger Entry ---
+    const bankCrDr = isContra ? 'Cr' : (voucherType === 'Receipt' ? 'Dr' : 'Cr');
+    const line2 = ['""', '""', '""', '""', '""', `"${bankLedgerName}"`, `"${amount.toFixed(2)}"`, `"${bankCrDr}"`, '""', '""', '""', '""', '""', '""', '""'].join(',');
+    
+    voucherNumber++;
+    return `${line1}\n${line2}`;
+  }).join('\n');
+
+  return `${headers}\n${rows}`;
+};
+// --- END OF ADDITION ---
+
+// --- ADD THIS ENTIRE COMPONENT ---
+const DownloadVoucherModal = ({ isOpen, onClose, data }) => {
+  const [filename, setFilename] = useState('');
+  const [includeReceipts, setIncludeReceipts] = useState(true);
+  const [includePayments, setIncludePayments] = useState(true);
+  const [includeContras, setIncludeContras] = useState(true);
+
+  useEffect(() => {
+    if (data?.suggested_filename) {
+      setFilename(data.suggested_filename);
+    }
+  }, [data]);
+
+  const handleDownload = () => {
+    let combinedVouchers = [];
+    if (includeReceipts) {
+        combinedVouchers.push(...data.receipt_vouchers.map(t => ({...t, voucher_type: 'Receipt'})));
+    }
+    if (includePayments) {
+        combinedVouchers.push(...data.payment_vouchers.map(t => ({...t, voucher_type: 'Payment'})));
+    }
+    if (includeContras) {
+        combinedVouchers.push(...data.contra_vouchers.map(t => ({...t, voucher_type: 'Contra'})));
+    }
+
+    if (combinedVouchers.length === 0) {
+      toast.error("No vouchers selected to download.");
+      return;
+    }
+
+    // Use our new helper function to generate the CSV content
+    const csvContent = generateTallyCSV(combinedVouchers, data.bank_ledger_name, data.statement_details);
+    
+    // Standard browser download logic
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Generate Tally Vouchers</DialogTitle>
+          <DialogDescription>Select voucher types and confirm filename for download.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="space-y-2">
+            <Label>Include Voucher Types:</Label>
+            <div className="flex items-center gap-6 pt-2">
+                <div className="flex items-center space-x-2"><Switch id="receipts" checked={includeReceipts} onCheckedChange={setIncludeReceipts} /><Label htmlFor="receipts">Receipts ({data.receipt_vouchers.length})</Label></div>
+                <div className="flex items-center space-x-2"><Switch id="payments" checked={includePayments} onCheckedChange={setIncludePayments} /><Label htmlFor="payments">Payments ({data.payment_vouchers.length})</Label></div>
+                <div className="flex items-center space-x-2"><Switch id="contras" checked={includeContras} onCheckedChange={setIncludeContras} /><Label htmlFor="contras">Contras ({data.contra_vouchers.length})</Label></div>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="filename">Filename</Label>
+            <Input id="filename" value={filename} onChange={(e) => setFilename(e.target.value)} />
+          </div>
+        </div>
+        <div className="flex justify-end gap-4 pt-4 border-t">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleDownload}><Download className="w-4 h-4 mr-2" />Download CSV</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+// --- END OF ADDITION ---```
+
 const API = `${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api`;
 
 // Main Dashboard Component
@@ -1196,6 +1332,8 @@ const StatementDetailsPage = () => {
   const [classificationResult, setClassificationResult] = useState(null);
   const [loading, setLoading] = useState(true); // Renamed from 'loading'
   const [classifying, setClassifying] = useState(false);
+  const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
+  const [voucherData, setVoucherData] = useState(null);
 
   
   // --- SIMPLIFIED runClassification ---
@@ -1238,9 +1376,29 @@ const StatementDetailsPage = () => {
   });
   toast.info("Transaction moved to 'Unmatched' for re-classification.");
   };
-  // --- END OF REPLACEMENT ---
-  // --- ADD this new handler function ---
 
+  // --- ADD THIS ENTIRE FUNCTION ---
+  const handleGenerateVouchers = async () => {
+    setClassifying(true); // Reuse the existing loading state for user feedback
+    try {
+      // Step A: Commit the current state to the database.
+      await axios.post(`${API}/statements/${statementId}/update-transactions`, {
+        processed_data: classificationResult.classified_transactions,
+      });
+      toast.success("Current progress saved!");
+
+      // Step B: Fetch the formatted voucher data from the backend.
+      const response = await axios.post(`${API}/generate-vouchers/${statementId}`);
+      setVoucherData(response.data);
+      setIsVoucherModalOpen(true); // Open the modal on success
+      
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to generate vouchers. Please try again.");
+    } finally {
+      setClassifying(false);
+    }
+  };
+  // --- END OF ADDITION ---
   // --- END OF NEW HANDLER ---
   useEffect(() => {
   const fetchStatement = async () => {
@@ -1290,10 +1448,17 @@ const StatementDetailsPage = () => {
             {classificationResult.matched_transactions} of {classificationResult.total_transactions} transactions matched.
           </p>
         </div>
+         <div className="flex items-center gap-2">
+          <Button onClick={handleGenerateVouchers} disabled={classifying} className="bg-blue-600 hover:bg-blue-700">
+            <Download className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
+            Download Vouchers
+          </Button>
+          {/* --- END OF ADDITION --- */}
         <Button onClick={runClassification} disabled={classifying}>
           <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
           Re-classify
         </Button>
+        </div>
       </div>
 
       {/* Unmatched Transaction Clusters Section */}
@@ -1335,6 +1500,13 @@ const StatementDetailsPage = () => {
         />
         </CardContent>
       </Card>
+      {/* Voucher Modal */}{/* --- ADD THIS COMPONENT AT THE END --- */}
+      <DownloadVoucherModal 
+        isOpen={isVoucherModalOpen}
+        onClose={() => setIsVoucherModalOpen(false)}
+        data={voucherData}
+      />
+      {/* --- END OF ADDITION --- */}
     </div>
   );
 };
