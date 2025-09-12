@@ -896,14 +896,18 @@ const ClientManagement = () => {
 };
 
 // Client Details Page Component
+// In App.js
+
+// --- REPLACE the entire existing ClientDetailsPage component with this ---
 const ClientDetailsPage = () => {
-  const { clientId } = useParams(); // Get the client ID from the URL
+  const { clientId } = useParams();
   const [client, setClient] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [statements, setStatements] = useState([]); // State for statements
+  const [statementToDelete, setStatementToDelete] = useState(null); // State for delete confirmation
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Fetch client and bank account data when the component loads
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
@@ -913,6 +917,11 @@ const ClientDetailsPage = () => {
 
         const accountsRes = await axios.get(`${API}/clients/${clientId}/bank-accounts`);
         setBankAccounts(accountsRes.data);
+        
+        // Fetch statements for the client
+        const statementsRes = await axios.get(`${API}/clients/${clientId}/statements`);
+        setStatements(statementsRes.data);
+
       } catch (error) {
         toast.error("Failed to fetch client details.");
       } finally {
@@ -927,6 +936,19 @@ const ClientDetailsPage = () => {
     setShowAddAccountModal(false);
   };
 
+  const handleDeleteStatement = async () => {
+    if (!statementToDelete) return;
+    try {
+      await axios.delete(`${API}/statements/${statementToDelete.id}`);
+      toast.success(`Statement "${statementToDelete.filename}" deleted.`);
+      // Update UI instantly
+      setStatements(prev => prev.filter(s => s.id !== statementToDelete.id));
+      setStatementToDelete(null); // Close the dialog
+    } catch (error) {
+      toast.error("Failed to delete statement.");
+    }
+  };
+
   if (loading) {
     return <div>Loading client details...</div>;
   }
@@ -939,9 +961,68 @@ const ClientDetailsPage = () => {
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-slate-900">{client.name}</h1>
-        <p className="text-slate-600 mt-2">Manage client settings and bank accounts.</p>
+        <p className="text-slate-600 mt-2">Manage client statements and bank accounts.</p>
       </div>
       
+      {/* Processed Statements Card */}
+      <Card className="border-0 shadow-sm">
+        <CardHeader>
+          <CardTitle>Processed Statements</CardTitle>
+          <CardDescription>Review or delete processed statements for this client.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {statements.length > 0 ? (
+              statements.map(stmt => {
+  const isCompleted = stmt.total_transactions > 0 && stmt.matched_transactions === stmt.total_transactions;
+  return (
+    <div key={stmt.id} className="p-4 border rounded-lg flex justify-between items-center bg-slate-50/50">
+      <div className="flex flex-col">
+        <div className="flex items-center gap-3">
+          <p className="font-semibold text-slate-800">{stmt.filename}</p>
+          <Badge 
+            variant={isCompleted ? "default" : "outline"}
+            className={isCompleted 
+              ? "bg-green-100 text-green-800 border-green-200" 
+              : "border-amber-400 text-amber-700"}
+          >
+            {isCompleted ? "Completed" : "Needs Review"}
+          </Badge>
+        </div>
+        <div className="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+          {stmt.bank_ledger_name && (
+            <span>Account: <span className="font-medium text-slate-600">{stmt.bank_ledger_name}</span></span>
+          )}
+          {stmt.statement_period && (
+            <span>Period: <span className="font-medium text-slate-600">{stmt.statement_period}</span></span>
+          )}
+          <span>Matched: <span className="font-medium text-slate-600">{stmt.matched_transactions} / {stmt.total_transactions}</span></span>
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <Link to={`/statements/${stmt.id}`}>
+          <Button variant="outline" size="sm">
+            <Eye className="w-4 h-4 mr-1" />
+            View
+          </Button>
+        </Link>
+        <Button variant="destructive" size="sm" onClick={() => setStatementToDelete(stmt)}>
+          <Trash2 className="w-4 h-4 mr-1" />
+          Delete
+        </Button>
+      </div>
+    </div>
+  );
+})
+            ) : (
+              <p className="text-center text-slate-500 py-4">No statements have been processed for this client yet.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Bank Accounts Card */}
       <Card className="border-0 shadow-sm">
         <CardHeader>
           <CardTitle>Bank Accounts</CardTitle>
@@ -979,9 +1060,27 @@ const ClientDetailsPage = () => {
         clientId={clientId}
         onSuccess={handleAccountCreated}
       />
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={!!statementToDelete} onOpenChange={(isOpen) => !isOpen && setStatementToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Are you absolutely sure?</DialogTitle>
+            <DialogDescription>
+              This action cannot be undone. This will permanently delete the statement
+              <span className="font-bold"> "{statementToDelete?.filename}"</span>.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button variant="outline" onClick={() => setStatementToDelete(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteStatement}>Confirm Delete</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 
 
 // --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
