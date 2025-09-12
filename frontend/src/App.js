@@ -42,6 +42,9 @@ import {
 
 
 // --- ADD THIS ENTIRE HELPER FUNCTION ---
+// In App.js
+
+// --- FIND AND REPLACE THE ENTIRE generateTallyCSV FUNCTION ---
 const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
   // Define the exact headers Tally expects
   const headers = [
@@ -51,22 +54,17 @@ const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
     "Change Mode", "Voucher Narration"
   ].join(',');
 
-  // Get the correct column names from the statement's mapping
-  const dateColumn = statement.column_mapping.date_column;
-  const amountColumn = statement.column_mapping.amount_column;
-  const narrationColumn = statement.column_mapping.narration_column;
-
   let voucherNumber = 1;
 
   const rows = vouchers.map(t => {
-    const voucherType = t.voucher_type; // This is a temporary key we'll add
+    const voucherType = t.voucher_type;
     const isContra = voucherType === 'Contra';
     
-    // Clean and parse the amount safely
-    const amount = parseFloat(String(t[amountColumn] || '0').replace(/,/g, ''));
-
-    // Format the date to DD/MM/YYYY
-    const formattedDate = (t[dateColumn] || '').split(' ')[0];
+    // --- THE FIX IS HERE: We now use the standardized keys directly ---
+    const amount = parseFloat(String(t['Amount'] || '0').replace(/,/g, ''));
+    const formattedDate = (t['Date'] || '').split(' ')[0];
+    const narration = t['Narration'] || '';
+    // --- END OF FIX ---
 
     // --- Line 1: The Party Ledger Entry ---
     const partyLedger = t.matched_ledger || 'Suspense';
@@ -75,7 +73,7 @@ const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
         `"${formattedDate}"`, `"${voucherType}"`, `"${voucherNumber}"`, '""',
         '""', `"${partyLedger}"`, `"${amount.toFixed(2)}"`, `"${partyCrDr}"`,
         '""', '""', '""', '""', '""',
-        '""', `"${(t[narrationColumn] || '').replace(/"/g, '""')}"` // Escape double quotes
+        '""', `"${(narration).replace(/"/g, '""')}"`
     ].join(',');
     
     // --- Line 2: The Bank Ledger Entry ---
@@ -88,6 +86,7 @@ const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
 
   return `${headers}\n${rows}`;
 };
+// --- END OF REPLACEMENT ---
 // --- END OF ADDITION ---
 
 // --- ADD THIS ENTIRE COMPONENT ---
@@ -1228,7 +1227,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     if (editableRegex && otherNarrations) {
       // Loop through narrations from *other* clusters
       for (const other of otherNarrations) {
-        if (testRegex(editableRegex, other.Description)) {
+        if (testRegex(editableRegex, other.Narration)) {
           fpCount++;
         }
       }
@@ -1236,7 +1235,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     setFalsePositiveCount(fpCount);
 
     // --- 2. Main Validation & Highlighting Logic ---
-    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t.Description));
+    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t.Narration));
     const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
 
     let status = 'none';
@@ -1266,7 +1265,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         client_id: clientId,
         ledger_name: ledgerName,
         regex_pattern: editableRegex,
-        sample_narrations: cluster.transactions.map(t => t.Description), // Send original narrations
+        sample_narrations: cluster.transactions.map(t => t.Narration), // Send original narrations
       };
       await axios.post(`${API}/ledger-rules`, payload);
       toast.success(`Rule for "${ledgerName}" created!`);
@@ -1424,8 +1423,8 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
           {matchedTransactions.map(transaction => (
             <tr key={transaction.Srl || Math.random()} className="border-b hover:bg-slate-50">
               <td className="p-2 whitespace-nowrap">{transaction['Value Date'] || transaction['Date']}</td>
-              <td className="p-2 max-w-sm truncate">{transaction.Description}</td>
-              <td className="p-2 text-right font-mono">{transaction['Amount (INR)']?.toLocaleString()}</td>
+              <td className="p-2 max-w-sm truncate">{transaction.Narration}</td>
+              <td className="p-2 text-right font-mono">{transaction.Amount?.toLocaleString()}</td>
               <td className="p-2">{transaction['CR/DR']}</td>
               <td className="p-2">
                 <Badge variant="secondary">{transaction.matched_ledger}</Badge>
@@ -1590,7 +1589,9 @@ const StatementDetailsPage = () => {
         // Get all narrations from transactions that were already successfully matched.
         return classificationResult.classified_transactions
             .filter(t => t.matched_ledger !== 'Suspense')
-            .map(t => t.Description);
+            .map(t => t.Narration);
+             console.log("Generated 'otherNarrations':", narrations); // <-- ADD THIS LOG
+
     }, [classificationResult]);
 
   if (loading || !classificationResult) {

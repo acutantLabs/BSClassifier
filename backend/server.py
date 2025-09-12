@@ -855,10 +855,30 @@ async def get_client_ledger_rules(client_id: str, db: AsyncSession = Depends(dat
         
         return rules
 # --- END OF REPLACEMENT ---
+# --- ADD THIS ENTIRE HELPER FUNCTION ---
+def create_standardized_transaction(transaction: Dict, mapping: Dict) -> Dict:
+    """
+    Creates a new, clean transaction dictionary containing only the essential
+    columns under standardized key names.
+    """
+    standardized = {}
+    
+    # Map essential columns using the provided mapping
+    standardized["Date"] = transaction.get(mapping.get("date_column"))
+    standardized["Narration"] = transaction.get(mapping.get("narration_column"))
+    standardized["Amount"] = transaction.get(mapping.get("amount_column"))
+    standardized["CR/DR"] = transaction.get(mapping.get("crdr_column"))
+    
+    # Only include Balance if it was mapped by the user
+    if mapping.get("balance_column"):
+        standardized["Balance"] = transaction.get(mapping.get("balance_column"))
+        
+    return standardized
+# --- END OF ADDITION ---
 
 # Transaction Classification
-
 # --- REPLACEMENT for the entire classify_transactions function ---
+# --- FIND AND REPLACE THE ENTIRE classify_transactions FUNCTION ---
 @api_router.post("/classify-transactions/{statement_id}")
 async def classify_transactions(statement_id: str, db: AsyncSession = Depends(database.get_db)):
     """Classify transactions using existing regex patterns and cluster unmatched ones."""
@@ -871,47 +891,52 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
     patterns = result.scalars().all()
     
     classified_transactions = []
-    unmatched_transactions = []
+    unmatched_transactions = [] # This will still hold the full, original objects for clustering
     
-    narration_col = statement.column_mapping.get("narration_column")
-    crdr_column = statement.column_mapping.get("crdr_column")
+    # Get the mapping from the statement itself
+    mapping = statement.column_mapping
+    narration_col = mapping.get("narration_column")
+    crdr_column = mapping.get("crdr_column")
+    
     if not narration_col or not crdr_column:
         raise HTTPException(status_code=400, detail="Narration or CR/DR column not defined in mapping")
 
     raw_data = statement.raw_data if isinstance(statement.raw_data, list) else []
     for transaction in raw_data:
+        # Create the clean, standardized base object FIRST
+        standardized_transaction = create_standardized_transaction(transaction, mapping)
+        
         narration = str(transaction.get(narration_col, ""))
         
         matched = False
         for pattern in patterns:
             try:
                 if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
-                    classified_transaction = transaction.copy()
-                    classified_transaction["matched_ledger"] = pattern.ledger_name
-                    classified_transaction["matched_pattern_id"] = pattern.id
-                    classified_transactions.append(classified_transaction)
+                    # Add the classification results to the CLEAN object
+                    standardized_transaction["matched_ledger"] = pattern.ledger_name
+                    standardized_transaction["matched_pattern_id"] = pattern.id
+                    classified_transactions.append(standardized_transaction)
                     matched = True
                     break
             except re.error:
                 continue
         
         if not matched:
-            classified_transaction = transaction.copy()
-            classified_transaction["matched_ledger"] = "Suspense"
-            classified_transactions.append(classified_transaction)
+            # Add the 'Suspense' ledger to the CLEAN object
+            standardized_transaction["matched_ledger"] = "Suspense"
+            classified_transactions.append(standardized_transaction)
+            
+            # For clustering, we still need the full, original object
             if narration:
                 unmatched_transactions.append(transaction)
     
-    # --- START OF NEW CLUSTERING ORCHESTRATION ---
+    # --- Clustering orchestration remains unchanged ---
     pre_clusters, remaining_transactions = await pre_cluster_by_shared_keywords(
         unmatched_transactions, narration_col, db
     )
-
-
-    # 1. Segregate unmatched transactions by CR/DR type
     debit_transactions = []
     credit_transactions = []
-    for t in unmatched_transactions:
+    for t in remaining_transactions: # Note: using remaining_transactions here
         raw_cr_dr = t.get(crdr_column)
         clean_cr_dr = ""
         if isinstance(raw_cr_dr, str):
@@ -922,15 +947,11 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
         elif clean_cr_dr == "CR":
             credit_transactions.append(t)
 
-    # 2. Cluster each group independently
     debit_clusters = await cluster_narrations(debit_transactions, narration_col, db)
     credit_clusters = await cluster_narrations(credit_transactions, narration_col, db)
-    
-    # 3. Combine the results
     final_clusters = pre_clusters + debit_clusters + credit_clusters
     
-    # --- END OF NEW CLUSTERING ORCHESTRATION ---
-    
+    # Save the LIST OF CLEAN, STANDARDIZED objects to processed_data
     statement.processed_data = classified_transactions
     await db.commit()
     
@@ -941,6 +962,7 @@ async def classify_transactions(statement_id: str, db: AsyncSession = Depends(da
         "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
         "unmatched_transactions": len(unmatched_transactions)
     }
+# --- END OF REPLACEMENT ---
 # In server.py, after the classify_transactions function
 
 # --- ADD THIS ENTIRE ENDPOINT ---
