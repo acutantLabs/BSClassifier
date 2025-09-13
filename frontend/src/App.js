@@ -1157,85 +1157,61 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
 // --- DEFINITIVE REPLACEMENT for ClusterCard ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach }) => {
-  console.log("Data for this cluster:", cluster.transactions);
+// In App.js
 
+// --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, narrationColumnName }) => {
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
-  
-  // State for live validation and highlighting
   const [validation, setValidation] = useState({ 
-    matchStatus: 'none', // 'all', 'partial', or 'none'
+    matchStatus: 'none',
     matchCount: 0,
-    highlightedNarrations: [] // Start with plain text
+    highlightedNarrations: []
   });
-  
-  // State specifically for the false positive warning
   const [falsePositiveCount, setFalsePositiveCount] = useState(0);
 
-  // This single, powerful useEffect handles all live validation and highlighting.
   useEffect(() => {
-    // Helper function to safely test a regex.
+    // If we don't know the narration column name yet, do nothing.
+    if (!narrationColumnName) return;
+
     const testRegex = (regexStr, text) => {
-      if (!text) return false; // Safety check for null/undefined text
+      if (!text) return false;
       try {
         return new RegExp(regexStr, 'i').test(text);
       } catch (e) {
-        return false; // Invalid regex syntax doesn't match anything
+        return false;
       }
     };
     
-    // Helper function to highlight the matched part of a string.
     const getHighlightedHtml = (regexStr, text) => {
       if (!text) return { html: '', matched: false };
-      let fpCount = 0;
-    if (editableRegex && otherNarrations) {
-      try {
-        const re = new RegExp(editableRegex, 'i');
-        for (const other of otherNarrations) {
-          // --- FIX 1: Test 'other' directly, as it's now an array of strings ---
-          if (re.test(other)) {
-            fpCount++;
-          }
-        }
-      } catch(e) { /* Invalid regex, do nothing */ }
-    }
-    setFalsePositiveCount(fpCount);
       try {
         const re = new RegExp(regexStr, 'i');
         const match = text.match(re);
-        
-        // If no match or the regex is empty/invalid, return plain text.
         if (!match || !match[0] || !regexStr) {
           return { html: text.replace(/</g, '&lt;'), matched: false };
         }
-        
-        // Escape the text to prevent HTML injection and then highlight the match.
         const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
         return { html: highlightedHtml, matched: true };
-        
       } catch (e) {
-        // On regex error, just return the plain text.
         return { html: text.replace(/</g, '&lt;'), matched: false };
       }
     };
 
-    // --- 1. False Positive Check Logic ---
     let fpCount = 0;
     if (editableRegex && otherNarrations) {
-      // Loop through narrations from *other* clusters
       for (const other of otherNarrations) {
-        if (testRegex(editableRegex, other.Narration)) {
+        if (testRegex(editableRegex, other)) {
           fpCount++;
         }
       }
     }
     setFalsePositiveCount(fpCount);
 
-    // --- 2. Main Validation & Highlighting Logic ---
-    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t.Narration));
+    // --- THE FIX: Use the dynamic narrationColumnName prop ---
+    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t[narrationColumnName]));
     const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
 
     let status = 'none';
@@ -1251,7 +1227,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       highlightedNarrations: newHighlightedResults.map(result => result.html)
     });
 
-  }, [editableRegex, cluster.transactions, otherNarrations]);
+  }, [editableRegex, cluster.transactions, otherNarrations, narrationColumnName]); // Add narrationColumnName to dependency array
 
   const handleCreateRule = async () => {
     if (!ledgerName.trim()) { toast.error("Ledger name is required."); return; }
@@ -1265,7 +1241,8 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         client_id: clientId,
         ledger_name: ledgerName,
         regex_pattern: editableRegex,
-        sample_narrations: cluster.transactions.map(t => t.Narration), // Send original narrations
+        // --- THE FIX: Use the dynamic narrationColumnName prop ---
+        sample_narrations: cluster.transactions.map(t => t[narrationColumnName]),
       };
       await axios.post(`${API}/ledger-rules`, payload);
       toast.success(`Rule for "${ledgerName}" created!`);
@@ -1274,21 +1251,13 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     finally { setLoading(false); }
   };
 
-const formatCurrency = (amount) => {
-    // Guard against null or undefined values
-    if (amount === null || typeof amount === 'undefined') {
-      return '';
-    }
-    
-    // THE FIX: Convert the input to a string and remove all commas
+  const formatCurrency = (amount) => {
+    if (amount === null || typeof amount === 'undefined') return '';
     const cleanedAmount = String(amount).replace(/,/g, '');
-    
-    // Convert the clean string to a number
     const num = Number(cleanedAmount);
-    
-    // If it's not a valid number, return nothing. Otherwise, format it as Indian Rupees.
     return isNaN(num) ? '' : `₹${num.toLocaleString('en-IN')}`;
   };
+
   return (
     <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
       <div className="flex justify-between items-center">
@@ -1314,7 +1283,6 @@ const formatCurrency = (amount) => {
         onChange={(e) => setEditableRegex(e.target.value)}
       />
 
-      {/* --- THIS IS THE RESTORED FALSE POSITIVE WARNING --- */}
       {falsePositiveCount > 0 && (
         <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
           <AlertCircle className="w-5 h-5 flex-shrink-0" />
@@ -1324,19 +1292,14 @@ const formatCurrency = (amount) => {
 
       <p className="text-sm font-semibold">Sample Transactions ({cluster.transactions.length} items):</p>
       
-      {/* --- THIS IS THE RESTORED NARRATION HIGHLIGHTING --- */}
-      {/* --- START OF REPLACEMENT BLOCK --- */}
       <ScrollArea className="h-32 p-2 border rounded-md bg-white">
         <div className="text-xs space-y-2">
           {cluster.transactions.map((transaction, i) => {
-            // --- NEW: Robust check for credit status ---
             const rawCrDr = transaction['CR/DR'] || '';
             const isCredit = rawCrDr.trim().replace(/\./g, '').toUpperCase() === 'CR';
-            // --- END OF NEW CODE ---
-
+            
             return (
               <div key={i} className="flex items-center justify-between gap-2 p-1 group">
-                {/* --- START: ADD THE DETACH BUTTON --- */}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1346,7 +1309,6 @@ const formatCurrency = (amount) => {
                 >
                   <X className="w-3 h-3 text-slate-500" />
                 </Button>
-                {/* --- END: ADD THE DETACH BUTTON --- */}
 
                 <div 
                   className="truncate flex-grow" 
@@ -1354,8 +1316,6 @@ const formatCurrency = (amount) => {
                 />
                 
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  
-                  {/* --- MODIFIED: The CR/DR Badge --- */}
                   <Badge 
                     className={`h-5 font-semibold ${isCredit 
                       ? 'bg-green-100 text-green-800 border-green-200' 
@@ -1363,25 +1323,21 @@ const formatCurrency = (amount) => {
                   >
                     {isCredit ? 'Credit' : 'Debit'}
                   </Badge>
-                  {/* --- END OF MODIFICATION --- */}
                   
                   <Badge variant="outline" className="font-mono">
                     {formatCurrency(transaction['Amount (INR)'])}
                   </Badge>
-
                 </div>
               </div>
             );
           })}
         </div>
       </ScrollArea>
-      {/* --- END OF REPLACEMENT BLOCK --- */}
       
       <div className="flex items-center gap-4 pt-2">
         <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
         <Button 
             onClick={handleCreateRule} 
-            // --- UPDATED DISABLED LOGIC TO INCLUDE FALSE POSITIVE CHECK ---
             disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
           <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
@@ -1390,7 +1346,6 @@ const formatCurrency = (amount) => {
   );
 };
 
-// --- END OF REPLACEMENT ---
 
 // --- ADD THIS ENTIRE NEW COMPONENT ---
 
@@ -1639,6 +1594,7 @@ const StatementDetailsPage = () => {
                 onRuleCreated={runClassification}
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
+                narrationColumnName={statement?.column_mapping?.narration_column}
               />
             ))
             // --- END OF NEW REPLACEMENT ---
@@ -1671,6 +1627,8 @@ const StatementDetailsPage = () => {
                 onRuleCreated={runClassification} // You can still create a rule from a single detached item
                 otherNarrations={otherNarrations}
                 onDetach={() => {}} // Detaching from this group does nothing
+                narrationColumnName={statement?.column_mapping?.narration_column}
+
             />
           </CardContent>
         </Card>
