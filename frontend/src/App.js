@@ -38,6 +38,8 @@ import {
   AlertCircle,
   CheckCircle2,
   HelpCircle,
+  ArrowUp,
+  ArrowDown,
   Zap
 } from 'lucide-react';
 
@@ -1927,15 +1929,24 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess }) => {
 // --- END OF REPLACEMENT ---
 
 // --- ADD THIS ENTIRE NEW PAGE COMPONENT ---
+// In App.js
+
+// --- FIND AND REPLACE THE ENTIRE PatternManagementPage COMPONENT ---
 const PatternManagementPage = () => {
   const [clients, setClients] = useState([]);
   const [selectedClient, setSelectedClient] = useState('');
   const [rules, setRules] = useState([]);
   const [loading, setLoading] = useState(false);
   
+  // State for rule health stats
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [sortConfig, setSortConfig] = useState({ key: 'ledger_name', direction: 'ascending' });
+
+  
   // Modal states
   const [showModal, setShowModal] = useState(false);
-  const [currentRule, setCurrentRule] = useState(null); // null for new, object for editing
+  const [currentRule, setCurrentRule] = useState(null);
   const [ruleToDelete, setRuleToDelete] = useState(null);
 
   useEffect(() => {
@@ -1943,9 +1954,7 @@ const PatternManagementPage = () => {
       try {
         const response = await axios.get(`${API}/clients`);
         setClients(response.data);
-      } catch (error) {
-        toast.error('Failed to fetch clients');
-      }
+      } catch (error) { toast.error('Failed to fetch clients'); }
     };
     fetchClients();
   }, []);
@@ -1953,6 +1962,7 @@ const PatternManagementPage = () => {
   const fetchRules = async (clientId) => {
     if (!clientId) {
       setRules([]);
+      setStats(null); // Clear stats when client changes
       return;
     }
     setLoading(true);
@@ -1970,6 +1980,65 @@ const PatternManagementPage = () => {
     fetchRules(selectedClient);
   }, [selectedClient]);
 
+  // Memoized sorting logic
+  const sortedRules = useMemo(() => {
+    let sortableItems = [...rules];
+    if (sortConfig !== null) {
+      sortableItems.sort((a, b) => {
+        let aValue, bValue;
+
+        if (sortConfig.key === 'total_matches' || sortConfig.key === 'last_used') {
+          const aStat = stats?.[a.ledger_name];
+          const bStat = stats?.[b.ledger_name];
+          
+          if (sortConfig.key === 'total_matches') {
+            aValue = aStat?.total_matches || 0;
+            bValue = bStat?.total_matches || 0;
+          } else { // last_used
+            aValue = aStat?.last_used ? new Date(aStat.last_used) : new Date(0); // Oldest date for null
+            bValue = bStat?.last_used ? new Date(bStat.last_used) : new Date(0);
+          }
+        } else { // ledger_name
+          aValue = a.ledger_name;
+          bValue = b.ledger_name;
+        }
+
+        if (aValue < bValue) return sortConfig.direction === 'ascending' ? -1 : 1;
+        if (aValue > bValue) return sortConfig.direction === 'ascending' ? 1 : -1;
+        return 0;
+      });
+    }
+    return sortableItems;
+  }, [rules, sortConfig, stats]);
+
+  const requestSort = (key) => {
+    let direction = 'ascending';
+    if (sortConfig.key === key && sortConfig.direction === 'ascending') {
+      direction = 'descending';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortIcon = (name) => {
+    if (sortConfig.key !== name) return null;
+    if (sortConfig.direction === 'ascending') return <ArrowUp className="w-4 h-4 inline ml-1" />;
+    return <ArrowDown className="w-4 h-4 inline ml-1" />;
+  };
+
+  const handleCalculateStats = async () => {
+    if (!selectedClient) return;
+    setStatsLoading(true);
+    try {
+      const response = await axios.get(`${API}/clients/${selectedClient}/rule-stats`);
+      setStats(response.data.stats);
+      toast.success("Health stats calculated!");
+    } catch (error) {
+      toast.error("Failed to calculate stats.");
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
   const handleOpenModal = (rule = null) => {
     setCurrentRule(rule);
     setShowModal(true);
@@ -1981,13 +2050,11 @@ const PatternManagementPage = () => {
       await axios.delete(`${API}/ledger-rules/${ruleToDelete.id}`);
       toast.success("Rule deleted successfully!");
       setRuleToDelete(null);
-      fetchRules(selectedClient); // Refresh the list
-    } catch (error) {
-      toast.error("Failed to delete rule.");
-    }
+      fetchRules(selectedClient);
+    } catch (error) { toast.error("Failed to delete rule."); }
   };
 
-  return (
+   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-slate-900">Pattern Management</h1>
@@ -1995,7 +2062,7 @@ const PatternManagementPage = () => {
       </div>
 
       <Card className="border-0 shadow-sm">
-        <CardHeader className="flex-row items-center justify-between">
+        <CardHeader className="flex-row items-center justify-between space-y-0">
           <div className="w-1/3">
             <Label>Select Client</Label>
             <Select onValueChange={setSelectedClient}>
@@ -2005,9 +2072,15 @@ const PatternManagementPage = () => {
               </SelectContent>
             </Select>
           </div>
-          <Button onClick={() => handleOpenModal()} disabled={!selectedClient}>
-            <Plus className="w-4 h-4 mr-2" /> Add New Rule
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleCalculateStats} disabled={!selectedClient || statsLoading}>
+              <Zap className="w-4 h-4 mr-2" />
+              {statsLoading ? 'Calculating...' : 'Calculate Health Stats'}
+            </Button>
+            <Button onClick={() => handleOpenModal()} disabled={!selectedClient}>
+              <Plus className="w-4 h-4 mr-2" /> Add New Rule
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           {selectedClient ? (
@@ -2015,16 +2088,26 @@ const PatternManagementPage = () => {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b">
-                    <th className="p-2 text-left font-semibold">Ledger Name</th>
+                    <th className="p-2 text-left font-semibold cursor-pointer hover:bg-slate-50" onClick={() => requestSort('ledger_name')}>
+                      Ledger Name {getSortIcon('ledger_name')}
+                    </th>
                     <th className="p-2 text-left font-semibold">Regex Pattern</th>
+                    <th className="p-2 text-left font-semibold w-32 cursor-pointer hover:bg-slate-50" onClick={() => requestSort('total_matches')}>
+                      Total Matches {getSortIcon('total_matches')}
+                    </th>
+                    <th className="p-2 text-left font-semibold w-32 cursor-pointer hover:bg-slate-50" onClick={() => requestSort('last_used')}>
+                      Last Used {getSortIcon('last_used')}
+                    </th>
                     <th className="p-2 text-center font-semibold w-32">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rules.map(rule => (
+                  {sortedRules.map(rule => (
                     <tr key={rule.id} className="border-b hover:bg-slate-50">
                       <td className="p-2 font-medium">{rule.ledger_name}</td>
                       <td className="p-2 font-mono text-xs">{rule.regex_pattern}</td>
+                      <td className="p-2">{stats?.[rule.ledger_name]?.total_matches ?? '---'}</td>
+                      <td className="p-2">{stats?.[rule.ledger_name]?.last_used ?? '---'}</td>
                       <td className="p-2 text-center">
                         <div className="flex gap-2 justify-center">
                           <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => handleOpenModal(rule)}>
@@ -2073,6 +2156,7 @@ const PatternManagementPage = () => {
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 // Main App Component
 function App() {
   return (

@@ -94,6 +94,15 @@ class ClientUpdate(ClientBase):
     """Model used for updating an existing client's name."""
     pass
 
+class RuleStat(BaseModel):
+    """Defines the health statistics for a single rule."""
+    total_matches: int
+    last_used: Optional[str] = None
+
+class RuleStatsResponse(BaseModel):
+    """The response model for the rule stats endpoint."""
+    stats: Dict[str, RuleStat]
+
 class ClientModel(ClientBase):
     """A simple model for a single client's details."""
     id: str
@@ -910,6 +919,59 @@ async def delete_ledger_rule(rule_id: str, db: AsyncSession = Depends(database.g
     return None # Return None for 204 No Content response
 # --- END OF ADDITION ---
 # In server.py
+@api_router.get("/clients/{client_id}/rule-stats", response_model=RuleStatsResponse)
+async def get_rule_stats(client_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Calculates on-demand health statistics for all rules of a given client."""
+    
+    # Step 1: Fetch all statements for the client
+    stmt_query = select(models.BankStatement).where(models.BankStatement.client_id == client_id)
+    result = await db.execute(stmt_query)
+    statements = result.scalars().all()
+
+    # Step 2: Initialize a structure to hold our calculations
+    # We use ledger_name as the key.
+    stats = defaultdict(lambda: {"total_matches": 0, "last_used_dt": None})
+
+    # Step 3: Iterate through all transactions of all statements
+    for statement in statements:
+        if not isinstance(statement.processed_data, list):
+            continue
+        
+        for transaction in statement.processed_data:
+            ledger_name = transaction.get("matched_ledger")
+            
+            # We only care about transactions matched to a specific rule, not Suspense
+            if not ledger_name or ledger_name == "Suspense":
+                continue
+
+            # Increment the match counter
+            stats[ledger_name]["total_matches"] += 1
+
+            # Update the last used date
+            date_str = transaction.get("Date")
+            if date_str:
+                try:
+                    # Parse the date string into a datetime object for comparison
+                    # This handles formats like 'DD/MM/YYYY HH:MM:SS'
+                    transaction_dt = datetime.strptime(date_str.split(' ')[0], '%d/%m/%Y')
+                    
+                    if (stats[ledger_name]["last_used_dt"] is None or 
+                        transaction_dt > stats[ledger_name]["last_used_dt"]):
+                        stats[ledger_name]["last_used_dt"] = transaction_dt
+                except (ValueError, TypeError):
+                    continue # Ignore rows with unparseable dates
+
+    # Step 4: Format the results for the final JSON response
+    final_stats = {
+        ledger: RuleStat(
+            total_matches=data["total_matches"],
+            last_used=data["last_used_dt"].strftime('%d %b %Y') if data["last_used_dt"] else None
+        )
+        for ledger, data in stats.items()
+    }
+
+    return RuleStatsResponse(stats=final_stats)
+# --- END OF ADDITION ---
 
 # --- FIND AND REPLACE THE ENTIRE classify-transactions FUNCTION ---
 @api_router.post("/classify-transactions/{statement_id}")
