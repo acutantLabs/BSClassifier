@@ -1325,9 +1325,9 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
 
 // --- ADD THIS ENTIRE NEW COMPONENT ---
 
+// --- FIND AND REPLACE THE ENTIRE ClassifiedTransactionsTable COMPONENT ---
 const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
-  // Filter out the 'Suspense' items, as they are handled by the cluster section
-   const transactionsToShow = transactions.filter(
+  const transactionsToShow = transactions.filter(
     t => t.matched_ledger !== "Suspense" || t.user_confirmed == true
   );
 
@@ -1337,27 +1337,30 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="w-full text-sm table-fixed"> {/* Use table-fixed for precise column widths */}
         <thead>
           <tr className="border-b">
-            <th className="p-2 text-left font-semibold">Date</th>
-            <th className="p-2 text-left font-semibold">Description</th>
-            <th className="p-2 text-right font-semibold">Amount (INR)</th>
-            <th className="p-2 text-left font-semibold">CR/DR</th>
-            <th className="p-2 text-left font-semibold">Matched Ledger</th>
-            <th className="p-2 text-center font-semibold">Actions</th>
+            <th className="p-2 text-left font-semibold w-40">Date</th> {/* Added fixed width */}
+            <th className="p-2 text-left font-semibold">Description</th> {/* Takes remaining space */}
+            <th className="p-2 text-right font-semibold w-32">Amount</th> {/* Added fixed width */}
+            <th className="p-2 text-left font-semibold w-24">CR/DR</th> {/* Added fixed width */}
+            <th className="p-2 text-left font-semibold w-48">Matched Ledger</th> {/* Shrunk width */}
+            <th className="p-2 text-center font-semibold w-24">Actions</th> {/* Added fixed width */}
           </tr>
         </thead>
         <tbody>
           {transactionsToShow.map(transaction => (
-            <tr key={transaction.Srl || Math.random()} className="border-b hover:bg-slate-50">
-              <td className="p-2 whitespace-nowrap">{transaction['Value Date'] || transaction['Date']}</td>
-              <td className="p-2 max-w-sm truncate">{transaction.Narration}</td>
+            <tr key={transaction.Narration + transaction.Amount + Math.random()} className="border-b hover:bg-slate-50">
+              <td className="p-2 whitespace-nowrap">{transaction.Date}</td>
+              
+              {/* --- THIS IS THE NEW DESCRIPTION CELL --- */}
+              <td className="p-2 max-w-sm ">{transaction.Narration}</td>
+
+              {/* --- END OF NEW DESCRIPTION CELL --- */}
+
               <td className="p-2 text-right font-mono">{transaction.Amount?.toLocaleString()}</td>
               <td className="p-2">{transaction['CR/DR']}</td>
-              <td className="p-2">
-                <Badge variant="secondary">{transaction.matched_ledger}</Badge>
-              </td>
+              <td className="p-2 truncate">{transaction.matched_ledger}</td>
               <td className="p-2 text-center">
                 <Button 
                   variant="ghost" 
@@ -1375,9 +1378,47 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 
-// --- END OF NEW COMPONENT ---
+// --- FIND AND REPLACE THE ENTIRE generateSimpleRegex FUNCTION ---
+const generateSimpleRegex = (narration) => {
+  if (!narration) return '.*';
 
+  // A more robust list of common banking/transaction noise words
+  const noise = new Set([
+    'NEFT', 'IMPS', 'UPI', 'RTGS', 'BY', 'TO', 'FOR', 'THE', 'AND', 'PAYMENT',
+    'TRANSFER', 'FUND', 'DEBIT', 'CREDIT', 'TRF', 'REF', 'CHECK', 'CHEQUE',
+    'WITHDRAWAL', 'ATM', 'CASH'
+  ]);
+  
+  // Split narration into potential keywords
+  const keywords = narration.toUpperCase().split(/[^A-Z0-9]+/);
+
+  // Find the first keyword that passes our stricter filter criteria
+  const meaningfulKeyword = keywords.find(kw => {
+    if (!kw || kw.length < 4) {
+      return false; // Ignore empty or short words
+    }
+    if (noise.has(kw)) {
+      return false; // Ignore common noise words
+    }
+    // A simple test to see if the word is mostly numeric (likely an ID)
+    const numbers = (kw.match(/\d/g) || []).length;
+    if (numbers > kw.length / 2) {
+      return false; // Ignore if more than half the characters are digits
+    }
+    return true; // This looks like a good keyword
+  });
+
+  if (meaningfulKeyword) {
+    // Escape any special characters in the keyword for the regex
+    const escapedKeyword = meaningfulKeyword.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    return `.*\\b${escapedKeyword}\\b.*`;
+  }
+
+  // If no good keyword is found after all filtering, return a generic pattern
+  return '.*';
+};
 // Statement Classification Page Component
 const StatementDetailsPage = () => {
   const { statementId } = useParams();
@@ -1499,7 +1540,8 @@ const StatementDetailsPage = () => {
         const newCluster = {
           cluster_id: `flagged-${Math.random()}`,
           transactions: [originalTransaction],
-          suggested_regex: ''
+          suggested_regex: generateSimpleRegex(originalTransaction[narrationColumn])
+
         };
         newClusters = [newCluster, ...prevResult.unmatched_clusters];
       }
@@ -1683,7 +1725,10 @@ const StatementDetailsPage = () => {
                 cluster={{
                     cluster_id: 'detached-group',
                     transactions: detachedTransactions,
-                    suggested_regex: '' // No suggestion for this mixed group
+                        suggested_regex: detachedTransactions.length > 0 
+      ? generateSimpleRegex(detachedTransactions[0][statement?.column_mapping?.narration_column]) 
+      : ''
+
                 }}
                 clientId={statement.client_id}
                 onRuleCreated={runClassification} // You can still create a rule from a single detached item
