@@ -761,11 +761,19 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
 };
 
 // Client Management Component
+// --- FIND AND REPLACE THE ENTIRE ClientManagement COMPONENT ---
 const ClientManagement = () => {
   const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(false);
+  
+  // State for Create Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newClient, setNewClient] = useState({ name: '' });
-  const [loading, setLoading] = useState(false);
+  
+  // --- START: New state for Edit Modal ---
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingClient, setEditingClient] = useState(null); // Will hold the client object being edited
+  // --- END: New state for Edit Modal ---
 
   useEffect(() => {
     fetchClients();
@@ -785,16 +793,40 @@ const ClientManagement = () => {
       toast.error('Client name is required');
       return;
     }
-
     setLoading(true);
     try {
       await axios.post(`${API}/clients`, { name: newClient.name });
       toast.success('Client created successfully!');
       setShowCreateModal(false);
       setNewClient({ name: ''});
-      fetchClients();
+      fetchClients(); // Refresh list
     } catch (error) {
       toast.error('Failed to create client');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- START: New handler functions for Edit ---
+  const handleOpenEditModal = (client) => {
+    setEditingClient(client); // Set the client to be edited
+    setShowEditModal(true);   // Open the modal
+  };
+
+  const handleUpdateClient = async () => {
+    if (!editingClient || !editingClient.name.trim()) {
+      toast.error('Client name is required');
+      return;
+    }
+    setLoading(true);
+    try {
+      await axios.put(`${API}/clients/${editingClient.id}`, { name: editingClient.name });
+      toast.success('Client updated successfully!');
+      setShowEditModal(false);
+      setEditingClient(null);
+      fetchClients(); // Refresh list
+    } catch (error) {
+      toast.error('Failed to update client');
     } finally {
       setLoading(false);
     }
@@ -830,7 +862,7 @@ const ClientManagement = () => {
                 <p>Bank Accounts: <span className="font-bold">{client.bank_account_count}</span></p>
               </div>
               <div className="flex gap-2 mt-4">
-                <Button variant="outline" size="sm">
+                <Button variant="outline" size="sm" onClick={() => handleOpenEditModal(client)}>
                   <Edit className="w-4 h-4 mr-1" />
                   Edit
                 </Button>
@@ -882,6 +914,44 @@ const ClientManagement = () => {
           </div>
         </DialogContent>
       </Dialog>
+    {/* --- START: Add the new Edit Client Modal --- */}
+      <Dialog open={showEditModal} onOpenChange={setShowEditModal}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Client Name</DialogTitle>
+            <DialogDescription>
+              Update the name for: <span className="font-bold">{editingClient?.name}</span>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <Label>New Client Name</Label>
+              <Input
+                value={editingClient?.name || ''}
+                onChange={(e) => setEditingClient(prev => ({ ...prev, name: e.target.value }))}
+                placeholder="Enter new client name"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button variant="outline" onClick={() => setShowEditModal(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleUpdateClient} disabled={loading}>
+              {loading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                'Save Changes'
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* --- END: Add the new Edit Client Modal --- */}
+
     </div>
   );
 };
