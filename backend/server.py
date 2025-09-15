@@ -251,6 +251,12 @@ class BankAccountModel(BankAccountBase):
         # --- THIS IS THE FIX ---
         from_attributes = True
 
+class DashboardStats(BaseModel):
+    """Defines the metrics for the main dashboard."""
+    total_clients: int
+    statements_processed: int
+    regex_patterns: int
+    success_rate: float
 
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
@@ -332,6 +338,41 @@ def extract_keywords(text: str, devalued_keywords: set) -> set:
             meaningful_tokens.add(token)
     return meaningful_tokens
 
+# In server.py
+
+# --- FIND AND REPLACE THE ENTIRE get_dashboard_stats FUNCTION ---
+@api_router.get("/dashboard-stats", response_model=DashboardStats)
+async def get_dashboard_stats(db: AsyncSession = Depends(database.get_db)):
+    """Calculates and returns key statistics for the main dashboard."""
+    
+    # --- THE FIX: Run queries sequentially, not in parallel ---
+    total_clients = await db.scalar(select(func.count(models.Client.id)))
+    statements_processed = await db.scalar(select(func.count(models.BankStatement.id)))
+    regex_patterns = await db.scalar(select(func.count(models.LedgerRule.id)))
+    # --- END OF FIX ---
+
+    # Calculate success rate (this part of the logic is fine)
+    total_transactions = 0
+    matched_transactions = 0
+    
+    stmt_query = select(models.BankStatement.processed_data)
+    result = await db.execute(stmt_query)
+    all_processed_data = result.scalars().all()
+
+    for processed_data in all_processed_data:
+        if isinstance(processed_data, list):
+            total_transactions += len(processed_data)
+            matched_transactions += sum(1 for t in processed_data if t.get("matched_ledger") != "Suspense")
+            
+    success_rate = (matched_transactions / total_transactions * 100) if total_transactions > 0 else 0.0
+
+    return DashboardStats(
+        total_clients=total_clients or 0, # Add 'or 0' for safety
+        statements_processed=statements_processed or 0,
+        regex_patterns=regex_patterns or 0,
+        success_rate=round(success_rate, 2)
+    )
+# --- END OF REPLACEMENT ---
 # --- REPLACEMENT for generate_regex_from_narrations ---
 async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession) -> str:
     """

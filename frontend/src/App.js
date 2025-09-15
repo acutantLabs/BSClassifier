@@ -173,29 +173,33 @@ const DownloadVoucherModal = ({ isOpen, onClose, data }) => {
 
 const API = `${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api`;
 
-// Main Dashboard Component
+// In App.js
+
+// --- FIND AND REPLACE THE ENTIRE Dashboard COMPONENT ---
 const Dashboard = () => {
-  const [clients, setClients] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [statsData, setStatsData] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchClients();
+    const fetchStats = async () => {
+      setLoading(true);
+      try {
+        const response = await axios.get(`${API}/dashboard-stats`);
+        setStatsData(response.data);
+      } catch (error) {
+        toast.error('Failed to fetch dashboard stats');
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStats();
   }, []);
 
-  const fetchClients = async () => {
-    try {
-      const response = await axios.get(`${API}/clients`);
-      setClients(response.data);
-    } catch (error) {
-      toast.error('Failed to fetch clients');
-    }
-  };
-
   const stats = [
-    { title: 'Total Clients', value: clients.length, icon: Users, color: 'text-blue-500' },
-    { title: 'Statements Processed', value: '0', icon: FileSpreadsheet, color: 'text-green-500' },
-    { title: 'Regex Patterns', value: '0', icon: Brain, color: 'text-purple-500' },
-    { title: 'Success Rate', value: '0%', icon: CheckCircle2, color: 'text-emerald-500' }
+    { title: 'Total Clients', value: loading ? '...' : statsData?.total_clients, icon: Users, color: 'text-blue-500' },
+    { title: 'Statements Processed', value: loading ? '...' : statsData?.statements_processed, icon: FileSpreadsheet, color: 'text-green-500' },
+    { title: 'Regex Patterns', value: loading ? '...' : statsData?.regex_patterns, icon: Brain, color: 'text-purple-500' },
+    { title: 'Success Rate', value: loading ? '...' : `${statsData?.success_rate}%`, icon: CheckCircle2, color: 'text-emerald-500' }
   ];
 
   return (
@@ -203,7 +207,7 @@ const Dashboard = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-4xl font-bold bg-gradient-to-r from-slate-900 to-slate-600 bg-clip-text text-transparent">
-            Tally Statement Processor
+            Acutant BS. Processor
           </h1>
           <p className="text-slate-600 mt-2">Automate bank statement processing and ledger classification</p>
         </div>
@@ -258,31 +262,16 @@ const Dashboard = () => {
             <CardDescription>Common tasks and shortcuts</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Link to="/clients">
-              <Button variant="outline" className="w-full justify-start">
-                <Users className="w-4 h-4 mr-2" />
-                Manage Clients
-              </Button>
-            </Link>
-            <Link to="/patterns">
-              <Button variant="outline" className="w-full justify-start">
-                <Brain className="w-4 h-4 mr-2" />
-                Regex Patterns
-              </Button>
-            </Link>
-            <Link to="/upload">
-              <Button variant="outline" className="w-full justify-start">
-                <Upload className="w-4 h-4 mr-2" />
-                Upload Statement
-              </Button>
-            </Link>
+            <Link to="/clients"><Button variant="outline" className="w-full justify-start"><Users className="w-4 h-4 mr-2" />Manage Clients</Button></Link>
+            <Link to="/patterns"><Button variant="outline" className="w-full justify-start"><Brain className="w-4 h-4 mr-2" />Regex Patterns</Button></Link>
+            <Link to="/upload"><Button variant="outline" className="w-full justify-start"><Upload className="w-4 h-4 mr-2" />Upload Statement</Button></Link>
           </CardContent>
         </Card>
       </div>
     </div>
   );
 };
-
+// --- END OF REPLACEMENT ---
 // File Upload Component
 const FileUpload = () => {
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -1778,7 +1767,7 @@ const Navigation = () => {
             <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-lg flex items-center justify-center">
               <FileSpreadsheet className="w-6 h-6 text-white" />
             </div>
-            <span className="text-xl font-bold text-slate-900">TallyProcessor</span>
+            <span className="text-xl font-bold text-slate-900">ABS Processor</span>
           </Link>
           
           <div className="flex items-center space-x-6">
