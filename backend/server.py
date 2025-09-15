@@ -149,6 +149,11 @@ class LedgerRule(LedgerRuleBase):
         # --- THIS IS THE FIX ---
         from_attributes = True
 
+class LedgerRuleUpdate(BaseModel):
+    """Model for updating an existing ledger rule."""
+    ledger_name: str
+    regex_pattern: str
+
 class BankStatement(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     client_id: str
@@ -876,15 +881,34 @@ def create_standardized_transaction(transaction: Dict, mapping: Dict) -> Dict:
         
     return standardized
 # --- END OF ADDITION ---
+# --- ADD THESE TWO NEW ENDPOINTS ---
+@api_router.put("/ledger-rules/{rule_id}", response_model=LedgerRule)
+async def update_ledger_rule(rule_id: str, rule_data: LedgerRuleUpdate, db: AsyncSession = Depends(database.get_db)):
+    """Update a ledger rule by its ID."""
+    db_rule = await db.get(models.LedgerRule, rule_id)
+    if not db_rule:
+        raise HTTPException(status_code=404, detail="Ledger rule not found")
+    
+    # Update the rule object with the new data
+    update_data = rule_data.dict()
+    for key, value in update_data.items():
+        setattr(db_rule, key, value)
+        
+    await db.commit()
+    await db.refresh(db_rule)
+    return db_rule
 
-# Transaction Classification
-# In server.py
-
-# In server.py
-
-# --- FIND AND REPLACE THE ENTIRE classify-transactions FUNCTION ---
-# In server.py
-
+@api_router.delete("/ledger-rules/{rule_id}", status_code=204)
+async def delete_ledger_rule(rule_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Delete a ledger rule by its ID."""
+    db_rule = await db.get(models.LedgerRule, rule_id)
+    if not db_rule:
+        raise HTTPException(status_code=404, detail="Ledger rule not found")
+    
+    await db.delete(db_rule)
+    await db.commit()
+    return None # Return None for 204 No Content response
+# --- END OF ADDITION ---
 # In server.py
 
 # --- FIND AND REPLACE THE ENTIRE classify-transactions FUNCTION ---

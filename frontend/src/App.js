@@ -1799,6 +1799,280 @@ const Navigation = () => {
   );
 };
 
+
+// --- FIND AND REPLACE THE ENTIRE RuleEditModal COMPONENT ---
+const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess }) => {
+  const [ledgerName, setLedgerName] = useState('');
+  const [regexPattern, setRegexPattern] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [validationResults, setValidationResults] = useState([]);
+  const isEditing = !!rule;
+
+  // Helper function for highlighting (reused from ClusterCard)
+  const getHighlightedHtml = (regexStr, text) => {
+    if (!text) return { html: '', matches: false };
+    try {
+      const re = new RegExp(regexStr, 'i');
+      const match = text.match(re);
+      if (!match || !match[0] || !regexStr) {
+        return { html: text.replace(/</g, '&lt;'), matches: false };
+      }
+      const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
+      return { html: highlightedHtml, matches: true };
+    } catch (e) {
+      return { html: text.replace(/</g, '&lt;'), matches: false };
+    }
+  };
+
+  // Pre-fill form when a rule is passed in
+  useEffect(() => {
+    if (rule) {
+      setLedgerName(rule.ledger_name);
+      setRegexPattern(rule.regex_pattern);
+    } else {
+      setLedgerName('');
+      setRegexPattern('');
+    }
+  }, [rule]);
+
+  // Live validation useEffect
+  useEffect(() => {
+    if (isEditing && rule?.sample_narrations) {
+      const results = rule.sample_narrations.map(narration => {
+        const { html, matches } = getHighlightedHtml(regexPattern, narration);
+        return { narration, html, matches };
+      });
+      setValidationResults(results);
+    } else {
+      setValidationResults([]);
+    }
+  }, [regexPattern, rule, isEditing]);
+
+  const handleSubmit = async () => {
+    if (!ledgerName.trim() || !regexPattern.trim()) {
+      toast.error("Ledger Name and Regex Pattern are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const payload = { client_id: clientId, ledger_name: ledgerName, regex_pattern: regexPattern, sample_narrations: rule?.sample_narrations || [] };
+      if (isEditing) {
+        await axios.put(`${API}/ledger-rules/${rule.id}`, { ledger_name: ledgerName, regex_pattern: regexPattern });
+        toast.success("Rule updated successfully!");
+      } else {
+        await axios.post(`${API}/ledger-rules`, payload);
+        toast.success("Rule created successfully!");
+      }
+      onSuccess();
+      onClose();
+    } catch (error) {
+      toast.error(`Failed to ${isEditing ? 'update' : 'create'} rule.`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{isEditing ? 'Edit Rule' : 'Create New Rule'}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div>
+            <Label>Ledger Name</Label>
+            <Input value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} placeholder="e.g., Office Supplies" />
+          </div>
+          <div>
+            <Label>Regex Pattern</Label>
+            <Textarea value={regexPattern} onChange={(e) => setRegexPattern(e.target.value)} placeholder="e.g., .*STAPLES.*" className="font-mono" />
+          </div>
+
+          {isEditing && validationResults.length > 0 && (
+            <>
+              <Separator />
+              <div className="space-y-2">
+                <Label>Live Test Against Sample Narrations</Label>
+                <ScrollArea className="h-40 p-2 border rounded-md bg-slate-50">
+                  <div className="text-xs space-y-2">
+                    {validationResults.map((result, index) => (
+                      <div key={index} className="flex items-start gap-2">
+                        <div className="flex-shrink-0 pt-0.5">
+                          {result.matches ? (
+                            <Check className="w-4 h-4 text-green-600" />
+                          ) : (
+                            <X className="w-4 h-4 text-red-600" />
+                          )}
+                        </div>
+                        <div className="flex-grow" dangerouslySetInnerHTML={{ __html: result.html }} />
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="flex justify-end gap-4 pt-4 border-t">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSubmit} disabled={loading}>
+            {loading ? 'Saving...' : 'Save Rule'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+// --- END OF REPLACEMENT ---
+
+// --- ADD THIS ENTIRE NEW PAGE COMPONENT ---
+const PatternManagementPage = () => {
+  const [clients, setClients] = useState([]);
+  const [selectedClient, setSelectedClient] = useState('');
+  const [rules, setRules] = useState([]);
+  const [loading, setLoading] = useState(false);
+  
+  // Modal states
+  const [showModal, setShowModal] = useState(false);
+  const [currentRule, setCurrentRule] = useState(null); // null for new, object for editing
+  const [ruleToDelete, setRuleToDelete] = useState(null);
+
+  useEffect(() => {
+    const fetchClients = async () => {
+      try {
+        const response = await axios.get(`${API}/clients`);
+        setClients(response.data);
+      } catch (error) {
+        toast.error('Failed to fetch clients');
+      }
+    };
+    fetchClients();
+  }, []);
+
+  const fetchRules = async (clientId) => {
+    if (!clientId) {
+      setRules([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await axios.get(`${API}/ledger-rules/${clientId}`);
+      setRules(response.data);
+    } catch (error) {
+      toast.error('Failed to fetch rules for client.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRules(selectedClient);
+  }, [selectedClient]);
+
+  const handleOpenModal = (rule = null) => {
+    setCurrentRule(rule);
+    setShowModal(true);
+  };
+
+  const handleDeleteRule = async () => {
+    if (!ruleToDelete) return;
+    try {
+      await axios.delete(`${API}/ledger-rules/${ruleToDelete.id}`);
+      toast.success("Rule deleted successfully!");
+      setRuleToDelete(null);
+      fetchRules(selectedClient); // Refresh the list
+    } catch (error) {
+      toast.error("Failed to delete rule.");
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">Pattern Management</h1>
+        <p className="text-slate-600 mt-2">Create, view, edit, and delete ledger rules for each client.</p>
+      </div>
+
+      <Card className="border-0 shadow-sm">
+        <CardHeader className="flex-row items-center justify-between">
+          <div className="w-1/3">
+            <Label>Select Client</Label>
+            <Select onValueChange={setSelectedClient}>
+              <SelectTrigger><SelectValue placeholder="Choose a client..." /></SelectTrigger>
+              <SelectContent>
+                {clients.map(client => <SelectItem key={client.id} value={client.id}>{client.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button onClick={() => handleOpenModal()} disabled={!selectedClient}>
+            <Plus className="w-4 h-4 mr-2" /> Add New Rule
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {selectedClient ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="p-2 text-left font-semibold">Ledger Name</th>
+                    <th className="p-2 text-left font-semibold">Regex Pattern</th>
+                    <th className="p-2 text-center font-semibold w-32">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map(rule => (
+                    <tr key={rule.id} className="border-b hover:bg-slate-50">
+                      <td className="p-2 font-medium">{rule.ledger_name}</td>
+                      <td className="p-2 font-mono text-xs">{rule.regex_pattern}</td>
+                      <td className="p-2 text-center">
+                        <div className="flex gap-2 justify-center">
+                          <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => handleOpenModal(rule)}>
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button variant="destructive" size="icon" className="h-8 w-8" onClick={() => setRuleToDelete(rule)}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {loading && <p className="text-center py-4">Loading rules...</p>}
+              {!loading && rules.length === 0 && <p className="text-center text-slate-500 py-8">No rules found for this client.</p>}
+            </div>
+          ) : (
+            <p className="text-center text-slate-500 py-8">Please select a client to see their rules.</p>
+          )}
+        </CardContent>
+      </Card>
+      
+      <RuleEditModal 
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        rule={currentRule}
+        clientId={selectedClient}
+        onSuccess={() => fetchRules(selectedClient)}
+      />
+
+      <Dialog open={!!ruleToDelete} onOpenChange={() => setRuleToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Are you sure?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete the rule for <span className="font-bold">"{ruleToDelete?.ledger_name}"</span>. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button variant="outline" onClick={() => setRuleToDelete(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteRule}>Confirm Delete</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
 // Main App Component
 function App() {
   return (
@@ -1810,7 +2084,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/upload" element={<FileUpload />} />
             <Route path="/clients" element={<ClientManagement />} />
-            <Route path="/patterns" element={<div>Regex Patterns (Coming Soon)</div>} />
+            <Route path="/patterns" element={<PatternManagementPage />} />
             <Route path="/clients/:clientId" element={<ClientDetailsPage />} />
             <Route path="/statements/:statementId" element={<StatementDetailsPage />} />
           </Routes>
