@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from pathlib import Path
 from sqlalchemy import select, func, outerjoin
+from sqlalchemy.orm import selectinload # <-- ADD THIS
 from typing import List, Dict, Optional, Any, Union, Tuple
 
 
@@ -877,90 +878,125 @@ def create_standardized_transaction(transaction: Dict, mapping: Dict) -> Dict:
 # --- END OF ADDITION ---
 
 # Transaction Classification
-# --- REPLACEMENT for the entire classify_transactions function ---
-# --- FIND AND REPLACE THE ENTIRE classify_transactions FUNCTION ---
+# In server.py
+
+# In server.py
+
+# --- FIND AND REPLACE THE ENTIRE classify-transactions FUNCTION ---
+# In server.py
+
+# In server.py
+
+# --- FIND AND REPLACE THE ENTIRE classify-transactions FUNCTION ---
 @api_router.post("/classify-transactions/{statement_id}")
-async def classify_transactions(statement_id: str, db: AsyncSession = Depends(database.get_db)):
-    """Classify transactions using existing regex patterns and cluster unmatched ones."""
+async def classify_transactions(
+    statement_id: str, 
+    db: AsyncSession = Depends(database.get_db),
+    force_reclassify: bool = Query(False, description="Force re-matching of rules against pending transactions")
+):
+    """
+    Classify transactions. This endpoint is STATE-AWARE.
+    - Default (force_reclassify=False): Fast load. Loads saved state and clusters pending items.
+    - Force (force_reclassify=True): Intelligent Merge. Re-runs rules on pending items and merges results.
+    """
     statement = await db.get(models.BankStatement, statement_id)
+
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
-    
-    query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
-    result = await db.execute(query)
-    patterns = result.scalars().all()
-    
-    classified_transactions = []
-    unmatched_transactions = [] # This will still hold the full, original objects for clustering
-    
-    # Get the mapping from the statement itself
+
     mapping = statement.column_mapping
     narration_col = mapping.get("narration_column")
-    crdr_column = mapping.get("crdr_column")
     
-    if not narration_col or not crdr_column:
-        raise HTTPException(status_code=400, detail="Narration or CR/DR column not defined in mapping")
+    # Step 1: Establish the "base of truth" from the database.
+    classified_transactions = statement.processed_data if isinstance(statement.processed_data, list) else []
 
-    raw_data = statement.raw_data if isinstance(statement.raw_data, list) else []
-    for transaction in raw_data:
-        # Create the clean, standardized base object FIRST
-        standardized_transaction = create_standardized_transaction(transaction, mapping)
-        
-        narration = str(transaction.get(narration_col, ""))
-        
-        matched = False
-        for pattern in patterns:
-            try:
+    # If it's the very first run, build the initial list from raw_data.
+    if not classified_transactions:
+        # This block is identical to our previous "first run" logic.
+        query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
+        result = await db.execute(query)
+        patterns = result.scalars().all()
+        raw_data = statement.raw_data or []
+        for transaction in raw_data:
+            standardized_transaction = create_standardized_transaction(transaction, mapping)
+            narration = str(transaction.get(narration_col, ""))
+            matched = False
+            for pattern in patterns:
                 if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
-                    # Add the classification results to the CLEAN object
                     standardized_transaction["matched_ledger"] = pattern.ledger_name
-                    standardized_transaction["matched_pattern_id"] = pattern.id
                     classified_transactions.append(standardized_transaction)
                     matched = True
                     break
-            except re.error:
-                continue
+            if not matched:
+                standardized_transaction["matched_ledger"] = "Suspense"
+                classified_transactions.append(standardized_transaction)
         
-        if not matched:
-            # Add the 'Suspense' ledger to the CLEAN object
-            standardized_transaction["matched_ledger"] = "Suspense"
-            classified_transactions.append(standardized_transaction)
-            
-            # For clustering, we still need the full, original object
-            if narration:
-                unmatched_transactions.append(transaction)
-    
-    # --- Clustering orchestration remains unchanged ---
-    pre_clusters, remaining_transactions = await pre_cluster_by_shared_keywords(
-        unmatched_transactions, narration_col, db
-    )
-    debit_transactions = []
-    credit_transactions = []
-    for t in remaining_transactions: # Note: using remaining_transactions here
-        raw_cr_dr = t.get(crdr_column)
-        clean_cr_dr = ""
-        if isinstance(raw_cr_dr, str):
-            clean_cr_dr = raw_cr_dr.strip().replace(".", "").upper()
-        
-        if clean_cr_dr == "DR":
-            debit_transactions.append(t)
-        elif clean_cr_dr == "CR":
-            credit_transactions.append(t)
+        statement.processed_data = classified_transactions
+        await db.commit() # Save the initial state
+        await db.refresh(statement)
 
+
+
+    # Step 2: If a re-classification is forced, perform the "Intelligent Merge".
+    if force_reclassify:
+        # A: Identify items that are eligible for re-classification.
+        items_to_recheck = [
+            t for t in classified_transactions
+            if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")
+        ]
+        
+        if items_to_recheck:
+            # B: Fetch rules and create a map of new matches for efficiency.
+            query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
+            result = await db.execute(query)
+            patterns = result.scalars().all()
+            reclassification_updates = {}
+            
+            for item in items_to_recheck:
+                for pattern in patterns:
+                    if re.search(pattern.regex_pattern, item['Narration'], re.IGNORECASE):
+                        reclassification_updates[item['Narration']] = pattern.ledger_name
+                        break # Found a match, move to the next item
+            
+            # C: Merge the updates back into our main list.
+            if reclassification_updates:
+                for i, t in enumerate(classified_transactions):
+                    if t['Narration'] in reclassification_updates:
+                        classified_transactions[i]['matched_ledger'] = reclassification_updates[t['Narration']]
+                
+                # D: Save the newly merged state back to the database.
+                statement.processed_data = classified_transactions
+                await db.commit()
+                await db.refresh(statement)
+                
+
+    # Step 3: Determine what STILL needs to be clustered after any potential updates.
+    pending_narrations_set = {
+        t['Narration'] for t in classified_transactions
+        if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")
+    }
+    transactions_to_cluster = [
+        t for t in (statement.raw_data or [])
+        if t.get(narration_col) in pending_narrations_set
+    ]
+
+    # Step 4: Run the full clustering orchestration on the remaining pending items.
+    pre_clusters, remaining_for_ml = await pre_cluster_by_shared_keywords(transactions_to_cluster, narration_col, db)
+    # (The rest of the clustering logic remains the same)
+    crdr_column = mapping.get("crdr_column")
+    debit_transactions = [t for t in remaining_for_ml if str(t.get(crdr_column,"")).strip().upper() == "DR"]
+    credit_transactions = [t for t in remaining_for_ml if str(t.get(crdr_column,"")).strip().upper() == "CR"]
     debit_clusters = await cluster_narrations(debit_transactions, narration_col, db)
     credit_clusters = await cluster_narrations(credit_transactions, narration_col, db)
     final_clusters = pre_clusters + debit_clusters + credit_clusters
     
-    # Save the LIST OF CLEAN, STANDARDIZED objects to processed_data
-    statement.processed_data = classified_transactions
-    await db.commit()
-    
+    # Step 5: Return the final state.
     return {
         "classified_transactions": classified_transactions,
         "unmatched_clusters": final_clusters,
-        "total_transactions": len(raw_data),
+        "total_transactions": len(statement.raw_data or []),
         "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
-        "unmatched_transactions": len(unmatched_transactions)
+        "unmatched_transactions": len(transactions_to_cluster)
     }
 # --- END OF REPLACEMENT ---
 # In server.py, after the classify_transactions function

@@ -37,6 +37,7 @@ import {
   ChevronRight,
   AlertCircle,
   CheckCircle2,
+  HelpCircle,
   Zap
 } from 'lucide-react';
 
@@ -1160,7 +1161,10 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 // In App.js
 
 // --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, narrationColumnName }) => {
+// In App.js
+
+// --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, narrationColumnName, onMarkAsSuspense }) => {
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1172,16 +1176,11 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
   const [falsePositiveCount, setFalsePositiveCount] = useState(0);
 
   useEffect(() => {
-    // If we don't know the narration column name yet, do nothing.
     if (!narrationColumnName) return;
 
     const testRegex = (regexStr, text) => {
       if (!text) return false;
-      try {
-        return new RegExp(regexStr, 'i').test(text);
-      } catch (e) {
-        return false;
-      }
+      try { return new RegExp(regexStr, 'i').test(text); } catch (e) { return false; }
     };
     
     const getHighlightedHtml = (regexStr, text) => {
@@ -1189,9 +1188,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       try {
         const re = new RegExp(regexStr, 'i');
         const match = text.match(re);
-        if (!match || !match[0] || !regexStr) {
-          return { html: text.replace(/</g, '&lt;'), matched: false };
-        }
+        if (!match || !match[0] || !regexStr) return { html: text.replace(/</g, '&lt;'), matched: false };
         const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
         return { html: highlightedHtml, matched: true };
@@ -1203,23 +1200,17 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     let fpCount = 0;
     if (editableRegex && otherNarrations) {
       for (const other of otherNarrations) {
-        if (testRegex(editableRegex, other)) {
-          fpCount++;
-        }
+        if (testRegex(editableRegex, other)) { fpCount++; }
       }
     }
     setFalsePositiveCount(fpCount);
 
-    // --- THE FIX: Use the dynamic narrationColumnName prop ---
     const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t[narrationColumnName]));
     const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
 
     let status = 'none';
-    if (currentMatchCount > 0 && currentMatchCount === cluster.transactions.length) {
-      status = 'all';
-    } else if (currentMatchCount > 0) {
-      status = 'partial';
-    }
+    if (currentMatchCount > 0 && currentMatchCount === cluster.transactions.length) status = 'all';
+    else if (currentMatchCount > 0) status = 'partial';
 
     setValidation({
       matchStatus: status,
@@ -1227,7 +1218,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       highlightedNarrations: newHighlightedResults.map(result => result.html)
     });
 
-  }, [editableRegex, cluster.transactions, otherNarrations, narrationColumnName]); // Add narrationColumnName to dependency array
+  }, [editableRegex, cluster.transactions, otherNarrations, narrationColumnName]);
 
   const handleCreateRule = async () => {
     if (!ledgerName.trim()) { toast.error("Ledger name is required."); return; }
@@ -1241,7 +1232,6 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         client_id: clientId,
         ledger_name: ledgerName,
         regex_pattern: editableRegex,
-        // --- THE FIX: Use the dynamic narrationColumnName prop ---
         sample_narrations: cluster.transactions.map(t => t[narrationColumnName]),
       };
       await axios.post(`${API}/ledger-rules`, payload);
@@ -1261,27 +1251,25 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
   return (
     <div className="p-4 border rounded-lg bg-slate-50 space-y-3">
       <div className="flex justify-between items-center">
-        <p className="text-sm font-semibold">Define Regex Pattern</p>
+        <div className="flex items-center gap-4">
+          <p className="text-sm font-semibold">Define Regex Pattern</p>
+          <Button size="sm" variant="outline" onClick={() => onMarkAsSuspense(cluster.transactions)}>
+            <HelpCircle className="w-4 h-4 mr-2" /> Mark All as Suspense
+          </Button>
+        </div>
         <div className="flex items-center gap-2">
           {(() => {
             const percentage = Math.round((validation.matchCount / cluster.transactions.length) * 100);
             switch (validation.matchStatus) {
-              case 'all':
-                return <span className="text-sm font-bold text-green-600 flex items-center"><CheckCircle2 className="w-4 h-4 mr-1"/> All Match</span>;
-              case 'partial':
-                return <span className="text-sm font-bold text-yellow-600">{`Partial Match [${validation.matchCount}/${cluster.transactions.length}]`}</span>;
-              default:
-                return <span className="text-sm font-bold text-red-600 flex items-center"><AlertCircle className="w-4 h-4 mr-1"/> No Match</span>;
+              case 'all': return <span className="text-sm font-bold text-green-600 flex items-center"><CheckCircle2 className="w-4 h-4 mr-1"/> All Match</span>;
+              case 'partial': return <span className="text-sm font-bold text-yellow-600">{`Partial Match [${validation.matchCount}/${cluster.transactions.length}]`}</span>;
+              default: return <span className="text-sm font-bold text-red-600 flex items-center"><AlertCircle className="w-4 h-4 mr-1"/> No Match</span>;
             }
           })()}
         </div>
       </div>
       
-      <Textarea
-        className="font-mono text-xs bg-white"
-        value={editableRegex}
-        onChange={(e) => setEditableRegex(e.target.value)}
-      />
+      <Textarea className="font-mono text-xs bg-white" value={editableRegex} onChange={(e) => setEditableRegex(e.target.value)} />
 
       {falsePositiveCount > 0 && (
         <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
@@ -1299,34 +1287,23 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
             const isCredit = rawCrDr.trim().replace(/\./g, '').toUpperCase() === 'CR';
             
             return (
-              <div key={i} className="flex items-center justify-between gap-2 p-1 group">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="w-6 h-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                  onClick={() => onDetach(transaction, cluster.cluster_id)}
-                  title="Detach from cluster"
-                >
-                  <X className="w-3 h-3 text-slate-500" />
-                </Button>
+              <div key={i} className="flex items-center justify-between gap-1 p-1 group">
+                <div className="flex-shrink-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                   <Button variant="ghost" size="icon" className="w-6 h-6" onClick={() => onMarkAsSuspense([transaction])} title="Mark as Suspense">
+                      <HelpCircle className="w-3 h-3 text-slate-500" />
+                   </Button>
+                   <Button variant="ghost" size="icon" className="w-6 h-6" onClick={() => onDetach(transaction, cluster.cluster_id)} title="Detach from cluster">
+                      <X className="w-3 h-3 text-slate-500" />
+                   </Button>
+                </div>
 
-                <div 
-                  className="truncate flex-grow" 
-                  dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} 
-                />
+                <div className="truncate flex-grow" dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} />
                 
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <Badge 
-                    className={`h-5 font-semibold ${isCredit 
-                      ? 'bg-green-100 text-green-800 border-green-200' 
-                      : 'bg-red-100 text-red-800 border-red-200'}`}
-                  >
+                  <Badge className={`h-5 font-semibold ${isCredit ? 'bg-green-100 text-green-800 border-green-200' : 'bg-red-100 text-red-800 border-red-200'}`}>
                     {isCredit ? 'Credit' : 'Debit'}
                   </Badge>
-                  
-                  <Badge variant="outline" className="font-mono">
-                    {formatCurrency(transaction['Amount (INR)'])}
-                  </Badge>
+                  <Badge variant="outline" className="font-mono">{formatCurrency(transaction['Amount (INR)'])}</Badge>
                 </div>
               </div>
             );
@@ -1336,28 +1313,25 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       
       <div className="flex items-center gap-4 pt-2">
         <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
-        <Button 
-            onClick={handleCreateRule} 
-            disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
+        <Button onClick={handleCreateRule} disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
           <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
       </div>
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 
 
 // --- ADD THIS ENTIRE NEW COMPONENT ---
 
 const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
-  console.log("Data received by table:", transactions); // <--- ADD THIS LINE
-
   // Filter out the 'Suspense' items, as they are handled by the cluster section
-  const matchedTransactions = transactions.filter(
-    t => t.matched_ledger !== "Suspense"
+   const transactionsToShow = transactions.filter(
+    t => t.matched_ledger !== "Suspense" || t.user_confirmed == true
   );
 
-  if (matchedTransactions.length === 0) {
+  if (transactionsToShow.length === 0) {
     return <p className="text-center text-slate-500 py-4">No transactions were matched to existing rules.</p>;
   }
 
@@ -1375,7 +1349,7 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
           </tr>
         </thead>
         <tbody>
-          {matchedTransactions.map(transaction => (
+          {transactionsToShow.map(transaction => (
             <tr key={transaction.Srl || Math.random()} className="border-b hover:bg-slate-50">
               <td className="p-2 whitespace-nowrap">{transaction['Value Date'] || transaction['Date']}</td>
               <td className="p-2 max-w-sm truncate">{transaction.Narration}</td>
@@ -1417,45 +1391,132 @@ const StatementDetailsPage = () => {
 
   
   // --- SIMPLIFIED runClassification ---
-  const runClassification = useCallback(async () => {
-  setClassifying(true);
-  try {
-    const response = await axios.post(`${API}/classify-transactions/${statementId}`);
-    setClassificationResult(response.data);
-    // The toast can be removed from here if it's annoying on re-classify
-  } catch (error) {
-    toast.error("Failed to run classification.");
-  } finally {
-    setClassifying(false);
-  }
+    const runClassification = useCallback(async (isForced = false) => {
+      if (isForced) {
+      setDetachedTransactions([]);
+    }
+    setClassifying(true);
+    try {
+      // Add the force_reclassify parameter if this is a forced action.
+      const url = isForced 
+        ? `${API}/classify-transactions/${statementId}?force_reclassify=true`
+        : `${API}/classify-transactions/${statementId}`;
+      
+      const response = await axios.post(url);
+      setClassificationResult(response.data);
+    } catch (error) {
+      toast.error("Failed to run classification.");
+    } finally {
+      setClassifying(false);
+    }
   }, [statementId]);
 
   // --- SIMPLIFIED handleFlagAsIncorrect ---
-  const handleFlagAsIncorrect = (transactionToFlag) => {
-  setClassificationResult(prevResult => {
-    if (!prevResult) return null;
-
-    // 1. Remove from classified
-    const newClassified = prevResult.classified_transactions.filter(
-      t => (t.Srl || t.id) !== (transactionToFlag.Srl || transactionToFlag.id)
-    );
-
-    // 2. Create the new cluster
-    const newCluster = {
-      cluster_id: `flagged-${transactionToFlag.Srl || Math.random()}`,
-      narrations: [transactionToFlag.Description],
-      suggested_regex: `.*${transactionToFlag.Description.split(/[^A-Za-z0-9]/).filter(Boolean)[0]}.*`,
-    };
-    
-    // 3. Return the new, complete state object
-    return {
-      ...prevResult,
-      classified_transactions: newClassified,
-      unmatched_clusters: [newCluster, ...prevResult.unmatched_clusters],
-    };
-  });
-  toast.info("Transaction moved to 'Unmatched' for re-classification.");
+    // --- ADD THIS NEW HELPER FUNCTION FIRST ---
+  const saveClassificationState = async (newClassificationResult) => {
+    if (!newClassificationResult) return;
+    try {
+      await axios.post(`${API}/statements/${statementId}/update-transactions`, {
+        processed_data: newClassificationResult.classified_transactions,
+      });
+      // Optional: show a subtle success toast, or none at all for background saves
+      // toast.success("Progress saved!");
+    } catch (error) {
+      toast.error("Failed to save progress. Please check your connection.");
+    }
   };
+
+  const handleMarkAsSuspense = (transactionsToMark) => {
+    const narrationColumn = statement?.column_mapping?.narration_column;
+    if (!narrationColumn) return;
+    const narrationsToMark = new Set(transactionsToMark.map(t => t[narrationColumn]));
+
+    let newResult; // To hold the new state
+    setClassificationResult(prevResult => {
+      if (!prevResult) return null;
+
+      const newClassified = prevResult.classified_transactions.map(t => {
+        if (narrationsToMark.has(t.Narration)) {
+          return { ...t, user_confirmed: true };
+        }
+        return t;
+      });
+
+      const newClusters = prevResult.unmatched_clusters.map(cluster => ({
+        ...cluster,
+        transactions: cluster.transactions.filter(t => !narrationsToMark.has(t[narrationColumn]))
+      })).filter(cluster => cluster.transactions.length > 0);
+
+      newResult = { // Assign the new state to our variable
+        ...prevResult,
+        classified_transactions: newClassified,
+        unmatched_clusters: newClusters,
+      };
+      return newResult;
+    });
+    
+    // Call the save function immediately after the state update is queued
+    setTimeout(() => saveClassificationState(newResult), 0);
+    toast.info(`${transactionsToMark.length} transaction(s) marked as Suspense.`);
+  };
+
+  // --- FIND AND REPLACE ONLY the handleFlagAsIncorrect function ---
+  const handleFlagAsIncorrect = (transactionToFlag) => {
+    const narrationColumn = statement?.column_mapping?.narration_column;
+    if (!narrationColumn) return;
+
+    let newResult;
+    setClassificationResult(prevResult => {
+      if (!prevResult) return null;
+
+      // Step 1: Modify the state, DON'T delete.
+      // Find the transaction and reset its status to a "pending" suspense item.
+      const newClassified = prevResult.classified_transactions.map(t => {
+        if (t.Narration === transactionToFlag.Narration) {
+          const resetTransaction = { ...t };
+          resetTransaction.matched_ledger = 'Suspense';
+          delete resetTransaction.user_confirmed;
+          delete resetTransaction.matched_pattern_id;
+          return resetTransaction;
+        }
+        return t;
+      });
+
+      // Step 2: Re-build the cluster view based on the new reality.
+      // Find the transaction we just reset.
+      const transactionToReCluster = newClassified.find(
+        t => t.Narration === transactionToFlag.Narration
+      );
+
+      // Find its original raw data for the cluster card.
+      const originalTransaction = (statement.raw_data || []).find(
+        raw => raw[narrationColumn] === transactionToReCluster.Narration
+      );
+
+      // If we found it, create a new cluster for it.
+      let newClusters = prevResult.unmatched_clusters;
+      if (originalTransaction) {
+        const newCluster = {
+          cluster_id: `flagged-${Math.random()}`,
+          transactions: [originalTransaction],
+          suggested_regex: ''
+        };
+        newClusters = [newCluster, ...prevResult.unmatched_clusters];
+      }
+
+      newResult = {
+        ...prevResult,
+        classified_transactions: newClassified,
+        unmatched_clusters: newClusters,
+      };
+      return newResult;
+    });
+
+    // Step 3: Save the FULL, modified list back to the database.
+    setTimeout(() => saveClassificationState(newResult), 0);
+    toast.info("Transaction moved back to 'Unmatched' for review.");
+  };
+// --- END OF REPLACEMENT ---
 
   // --- ADD THIS ENTIRE FUNCTION ---
   const handleGenerateVouchers = async () => {
@@ -1568,7 +1629,7 @@ const StatementDetailsPage = () => {
             Download Vouchers
           </Button>
           {/* --- END OF ADDITION --- */}
-        <Button onClick={runClassification} disabled={classifying}>
+        <Button onClick={() => runClassification(true)} disabled={classifying}>
           <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
           Re-classify
         </Button>
@@ -1594,6 +1655,7 @@ const StatementDetailsPage = () => {
                 onRuleCreated={runClassification}
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
+                onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
                 narrationColumnName={statement?.column_mapping?.narration_column}
               />
             ))
@@ -1627,6 +1689,7 @@ const StatementDetailsPage = () => {
                 onRuleCreated={runClassification} // You can still create a rule from a single detached item
                 otherNarrations={otherNarrations}
                 onDetach={() => {}} // Detaching from this group does nothing
+                onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
                 narrationColumnName={statement?.column_mapping?.narration_column}
 
             />
