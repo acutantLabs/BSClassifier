@@ -1043,43 +1043,61 @@ const ClientDetailsPage = () => {
           <div className="space-y-3">
             {statements.length > 0 ? (
               statements.map(stmt => {
-  const isCompleted = stmt.total_transactions > 0 && stmt.matched_transactions === stmt.total_transactions;
+  const isCompleted = stmt.status === "Completed";
+
+  const getPercentageColor = (percentage) => {
+    const p = typeof percentage === 'number' ? percentage : 0;
+    if (p === 100) return "bg-green-100 text-green-800 border-green-200";
+    if (p >= 75) return "bg-teal-100 text-teal-800 border-teal-200";
+    if (p >= 40) return "bg-amber-100 text-amber-800 border-amber-200";
+    if (p > 0) return "bg-orange-100 text-orange-800 border-orange-200";
+    return "bg-red-100 text-red-800 border-red-200";
+  };
+
   return (
-    <div key={stmt.id} className="p-4 border rounded-lg flex justify-between items-center bg-slate-50/50">
-      <div className="flex flex-col">
-        <div className="flex items-center gap-3">
-          <p className="font-semibold text-slate-800">{stmt.filename}</p>
+    <div key={stmt.id} className="p-4 border rounded-lg bg-slate-50/50 flex flex-col gap-2">
+      {/* --- TOP ROW: Filename and Badges --- */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <p className="font-semibold text-slate-800 truncate">{stmt.filename}</p>
           <Badge 
             variant={isCompleted ? "default" : "outline"}
             className={isCompleted 
               ? "bg-green-100 text-green-800 border-green-200" 
               : "border-amber-400 text-amber-700"}
           >
-            {isCompleted ? "Completed" : "Needs Review"}
+            {stmt.status}
           </Badge>
-        </div>
-        <div className="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
-          {stmt.bank_ledger_name && (
-            <span>Account: <span className="font-medium text-slate-600">{stmt.bank_ledger_name}</span></span>
-          )}
-          {stmt.statement_period && (
-            <span>Period: <span className="font-medium text-slate-600">{stmt.statement_period}</span></span>
-          )}
-          <span>Matched: <span className="font-medium text-slate-600">{stmt.matched_transactions} / {stmt.total_transactions}</span></span>
+          <Badge variant="outline" className={getPercentageColor(stmt.completion_percentage)}>
+            {stmt.completion_percentage.toFixed(2)}%
+          </Badge>
         </div>
       </div>
 
-      <div className="flex gap-2">
-        <Link to={`/statements/${stmt.id}`}>
-          <Button variant="outline" size="sm">
-            <Eye className="w-4 h-4 mr-1" />
-            View
+      {/* --- MIDDLE ROW (METADATA) --- */}
+      <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span>Uploaded: <span className="font-medium text-slate-600">{new Date(stmt.upload_date).toLocaleDateString()}</span></span>
+        {stmt.bank_ledger_name && <span className="text-slate-300">|</span>}
+        {stmt.bank_ledger_name && <span>Account: <span className="font-medium text-slate-600">{stmt.bank_ledger_name}</span></span>}
+        {stmt.statement_period && <span className="text-slate-300">|</span>}
+        {stmt.statement_period && <span>Period: <span className="font-medium text-slate-600">{stmt.statement_period}</span></span>}
+        <span className="text-slate-300">|</span>
+        <span>Matched: <span className="font-medium text-slate-600">{stmt.matched_transactions} / {stmt.total_transactions}</span></span>
+      </div>
+      
+      {/* --- BOTTOM ROW (PROGRESS BAR & ACTIONS) --- */}
+      <div className="flex items-center gap-4 mt-1">
+        <Progress value={stmt.completion_percentage} className="h-2" />
+        <div className="flex gap-2 flex-shrink-0">
+          <Link to={`/statements/${stmt.id}`}>
+            <Button variant="outline" size="sm" className="h-8">
+              <Eye className="w-4 h-4 mr-1" /> View
+            </Button>
+          </Link>
+          <Button variant="destructive" size="sm" className="h-8" onClick={() => setStatementToDelete(stmt)}>
+            <Trash2 className="w-4 h-4 mr-1" /> Delete
           </Button>
-        </Link>
-        <Button variant="destructive" size="sm" onClick={() => setStatementToDelete(stmt)}>
-          <Trash2 className="w-4 h-4 mr-1" />
-          Delete
-        </Button>
+        </div>
       </div>
     </div>
   );

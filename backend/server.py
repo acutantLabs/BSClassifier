@@ -136,8 +136,10 @@ class StatementMetadata(BaseModel):
     upload_date: datetime
     total_transactions: int
     matched_transactions: int
-    bank_ledger_name: Optional[str] = None # Added field
-    statement_period: Optional[str] = None # Added field
+    bank_ledger_name: Optional[str] = None
+    statement_period: Optional[str] = None
+    status: str  # New field for "Completed" or "Needs Review"
+    completion_percentage: float # New field for the percentage
 
     class Config:
         from_attributes = True
@@ -1410,12 +1412,12 @@ async def get_client_bank_accounts(client_id: str, db: AsyncSession = Depends(da
     accounts = result.scalars().all()
     return accounts
 
-# --- ADD THIS ENTIRE BLOCK OF CODE ---
+
+# --- FIND AND REPLACE THE ENTIRE get_client_statements FUNCTION ---
 @api_router.get("/clients/{client_id}/statements", response_model=List[StatementMetadata])
 async def get_client_statements(client_id: str, db: AsyncSession = Depends(database.get_db)):
-    """Get all statement metadata for a specific client, including bank account info and period."""
+    """Get all statement metadata for a specific client, including smart status."""
     
-    # Query BankStatement and join with BankAccount to get ledger_name
     query = (
         select(models.BankStatement, models.BankAccount.ledger_name)
         .join(models.BankAccount, models.BankStatement.bank_account_id == models.BankAccount.id)
@@ -1425,43 +1427,54 @@ async def get_client_statements(client_id: str, db: AsyncSession = Depends(datab
     result = await db.execute(query)
     
     metadata_list = []
-    for stmt, bank_ledger_name in result.all(): # Fetch both statement object and ledger_name
+    for stmt, bank_ledger_name in result.all():
         total = len(stmt.raw_data) if isinstance(stmt.raw_data, list) else 0
-        matched = 0
-        if isinstance(stmt.processed_data, list):
-            matched = sum(1 for t in stmt.processed_data if t.get("matched_ledger") != "Suspense")
         
-        # Determine statement period
+        # --- START: NEW CALCULATION LOGIC ---
+        pending_count = 0
+        matched_count = 0
+        if isinstance(stmt.processed_data, list):
+            for t in stmt.processed_data:
+                # Count items that are 'Suspense' AND not confirmed by the user
+                if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed"):
+                    pending_count += 1
+                # Count items that are not 'Suspense'
+                if t.get("matched_ledger") != "Suspense":
+                    matched_count += 1
+        
+        status = "Completed" if pending_count == 0 else "Needs Review"
+        completion_percentage = 0.0
+        if total > 0:
+            completion_percentage = round(((total - pending_count) / total) * 100, 2)
+        # --- END: NEW CALCULATION LOGIC ---
+        # --- THIS IS THE RESTORED LOGIC ---
         statement_period = None
         if stmt.raw_data and stmt.column_mapping.get("date_column"):
             date_column = stmt.column_mapping["date_column"]
-            dates = []
-            for transaction in stmt.raw_data:
-                date_str = transaction.get(date_column)
-                if date_str:
-                    try:
-                        # Use pandas to_datetime for robust parsing, dayfirst=True is common for Indian statements
-                        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
-                        if pd.notna(dt):
-                            dates.append(dt)
-                    except Exception:
-                        continue # Skip invalid dates
-            
-            if dates:
-                min_date = min(dates)
-                max_date = max(dates)
+            dates = [
+                pd.to_datetime(t.get(date_column), dayfirst=True, errors='coerce') 
+                for t in stmt.raw_data if t.get(date_column)
+            ]
+            valid_dates = [d for d in dates if pd.notna(d)]
+            if valid_dates:
+                min_date = min(valid_dates)
+                max_date = max(valid_dates)
                 statement_period = f"{min_date.strftime('%d %b %Y')} - {max_date.strftime('%d %b %Y')}"
+        # --- END OF RESTORED LOGIC ---
 
         metadata_list.append(StatementMetadata(
             id=stmt.id,
             filename=stmt.filename,
             upload_date=stmt.upload_date,
             total_transactions=total,
-            matched_transactions=matched,
-            bank_ledger_name=bank_ledger_name, # Pass the fetched ledger name
-            statement_period=statement_period    # Pass the calculated period
+            matched_transactions=matched_count, # Use the calculated matched count
+            bank_ledger_name=bank_ledger_name,
+            statement_period=statement_period,
+            status=status, # Add new status
+            completion_percentage=completion_percentage # Add new percentage
         ))
     return metadata_list
+# --- END OF REPLACEMENT ---
 
 @api_router.delete("/statements/{statement_id}", status_code=204)
 async def delete_statement(statement_id: str, db: AsyncSession = Depends(database.get_db)):
