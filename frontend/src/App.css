@@ -287,3 +287,11 @@ body {
   text-align: left;
 }
 /* --- END OF ADDITION --- */
+/* --- ADD THIS CLASS AT THE END OF THE FILE --- */
+.hyphenate {
+  overflow-wrap: break-word; /* Allows breaking long words */
+  -webkit-hyphens: auto;      /* For Safari */
+  -ms-hyphens: auto;          /* For IE */
+  hyphens: auto;              /* Standard */
+}
+/* --- END OF ADDITION --- */

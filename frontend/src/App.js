@@ -89,15 +89,15 @@ const generateTallyCSV = (vouchers, bankLedgerName, statement) => {
 
   return `${headers}\n${rows}`;
 };
-// --- END OF REPLACEMENT ---
-// --- END OF ADDITION ---
 
-// --- ADD THIS ENTIRE COMPONENT ---
-const DownloadVoucherModal = ({ isOpen, onClose, data }) => {
+
+// --- ADD/REPLACE THIS ENTIRE COMPONENT ---
+const DownloadVoucherModal = ({ isOpen, onClose, data, statementId }) => {
   const [filename, setFilename] = useState('');
   const [includeReceipts, setIncludeReceipts] = useState(true);
   const [includePayments, setIncludePayments] = useState(true);
   const [includeContras, setIncludeContras] = useState(true);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   useEffect(() => {
     if (data?.suggested_filename) {
@@ -105,37 +105,40 @@ const DownloadVoucherModal = ({ isOpen, onClose, data }) => {
     }
   }, [data]);
 
-  const handleDownload = () => {
-    let combinedVouchers = [];
-    if (includeReceipts) {
-        combinedVouchers.push(...data.receipt_vouchers.map(t => ({...t, voucher_type: 'Receipt'})));
-    }
-    if (includePayments) {
-        combinedVouchers.push(...data.payment_vouchers.map(t => ({...t, voucher_type: 'Payment'})));
-    }
-    if (includeContras) {
-        combinedVouchers.push(...data.contra_vouchers.map(t => ({...t, voucher_type: 'Contra'})));
-    }
+  const handleDownload = async () => {
+    setIsDownloading(true);
+    try {
+      const payload = {
+        include_receipts: includeReceipts,
+        include_payments: includePayments,
+        include_contras: includeContras,
+        filename: filename
+      };
 
-    if (combinedVouchers.length === 0) {
-      toast.error("No vouchers selected to download.");
-      return;
-    }
+      const response = await axios.post(
+        `${API}/generate-vouchers/${statementId}`,
+        payload,
+        { responseType: 'blob' }
+      );
+      
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      
+      const finalFilename = `${filename}.xlsx`;
+      link.setAttribute('download', finalFilename);
+      document.body.appendChild(link);
+      link.click();
+      
+      link.parentNode.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      onClose();
 
-    // Use our new helper function to generate the CSV content
-    const csvContent = generateTallyCSV(combinedVouchers, data.bank_ledger_name, data.statement_details);
-    
-    // Standard browser download logic
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", filename);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    onClose();
+    } catch (error) {
+      toast.error("Failed to generate XLSX file.");
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -151,25 +154,30 @@ const DownloadVoucherModal = ({ isOpen, onClose, data }) => {
           <div className="space-y-2">
             <Label>Include Voucher Types:</Label>
             <div className="flex items-center gap-6 pt-2">
-                <div className="flex items-center space-x-2"><Switch id="receipts" checked={includeReceipts} onCheckedChange={setIncludeReceipts} /><Label htmlFor="receipts">Receipts ({data.receipt_vouchers.length})</Label></div>
-                <div className="flex items-center space-x-2"><Switch id="payments" checked={includePayments} onCheckedChange={setIncludePayments} /><Label htmlFor="payments">Payments ({data.payment_vouchers.length})</Label></div>
-                <div className="flex items-center space-x-2"><Switch id="contras" checked={includeContras} onCheckedChange={setIncludeContras} /><Label htmlFor="contras">Contras ({data.contra_vouchers.length})</Label></div>
+                <div className="flex items-center space-x-2"><Switch id="receipts" checked={includeReceipts} onCheckedChange={setIncludeReceipts} disabled={data.receipt_count === 0} /><Label htmlFor="receipts">Receipts ({data.receipt_count})</Label></div>
+                <div className="flex items-center space-x-2"><Switch id="payments" checked={includePayments} onCheckedChange={setIncludePayments} disabled={data.payment_count === 0}/><Label htmlFor="payments">Payments ({data.payment_count})</Label></div>
+                <div className="flex items-center space-x-2"><Switch id="contras" checked={includeContras} onCheckedChange={setIncludeContras} disabled={data.contra_count === 0}/><Label htmlFor="contras">Contras ({data.contra_count})</Label></div>
             </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="filename">Filename</Label>
-            <Input id="filename" value={filename} onChange={(e) => setFilename(e.target.value)} />
+            <div className="flex items-center">
+              <Input id="filename" value={filename} onChange={(e) => setFilename(e.target.value)} />
+              <span className="ml-2 text-slate-500">.xlsx</span>
+            </div>
           </div>
         </div>
         <div className="flex justify-end gap-4 pt-4 border-t">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleDownload}><Download className="w-4 h-4 mr-2" />Download CSV</Button>
+          <Button onClick={handleDownload} disabled={isDownloading}>
+            {isDownloading ? 'Generating...' : <><Download className="w-4 h-4 mr-2" />Download XLSX</>}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
   );
 };
-// --- END OF ADDITION ---```
+// --- END OF REPLACEMENT ---
 
 const API = `${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api`;
 
@@ -1415,7 +1423,7 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
               <td className="p-2 whitespace-nowrap">{transaction.Date}</td>
               
               {/* --- THIS IS THE NEW DESCRIPTION CELL --- */}
-              <td className="p-2 max-w-sm ">{transaction.Narration}</td>
+              <td className="p-2 max-w-sm hyphenate">{transaction.Narration}</td>
 
               {/* --- END OF NEW DESCRIPTION CELL --- */}
 
@@ -1491,6 +1499,7 @@ const StatementDetailsPage = () => {
   const [voucherData, setVoucherData] = useState(null);
   const [detachedTransactions, setDetachedTransactions] = useState([]);
 
+  
   
   // --- SIMPLIFIED runClassification ---
     const runClassification = useCallback(async (isForced = false) => {
@@ -1623,21 +1632,18 @@ const StatementDetailsPage = () => {
 
   // --- ADD THIS ENTIRE FUNCTION ---
   const handleGenerateVouchers = async () => {
-    setClassifying(true); // Reuse the existing loading state for user feedback
+    setClassifying(true);
     try {
-      // Step A: Commit the current state to the database.
-      await axios.post(`${API}/statements/${statementId}/update-transactions`, {
-        processed_data: classificationResult.classified_transactions,
-      });
-      toast.success("Current progress saved!");
-
-      // Step B: Fetch the formatted voucher data from the backend.
-      const response = await axios.post(`${API}/generate-vouchers/${statementId}`);
+      // Step 1: Always save the latest state before generating.
+      await saveClassificationState(classificationResult);
+      
+      // Step 2: Fetch the counts and suggested filename for the modal.
+      const response = await axios.get(`${API}/vouchers/${statementId}/summary`);
       setVoucherData(response.data);
-      setIsVoucherModalOpen(true); // Open the modal on success
+      setIsVoucherModalOpen(true); // Open the modal
       
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Failed to generate vouchers. Please try again.");
+      toast.error("Could not prepare voucher data. Please try again.");
     } finally {
       setClassifying(false);
     }
@@ -1694,14 +1700,12 @@ const StatementDetailsPage = () => {
 
   // Effect 2: Run the classification ONLY when the statement has been successfully fetched.
   useEffect(() => {
-  if (statement) {
-    // We wrap runClassification in an async IIFE to handle the final setLoading
-    (async () => {
-      await runClassification();
-      setLoading(false); // Turn off the main loading indicator AFTER classification is done
-    })();
+    if (statement && !classificationResult) {
+      runClassification();
     }
-  }, [statement, runClassification]); // Dependency array is correct
+  }, [statement, classificationResult, runClassification]);
+
+
   // --- ADD THIS LOGIC inside StatementDetailsPage, before the return statement ---
   const otherNarrations = useMemo(() => {
         if (!classificationResult) return [];
@@ -1728,8 +1732,8 @@ const StatementDetailsPage = () => {
         </div>
          <div className="flex items-center gap-2">
           <Button onClick={handleGenerateVouchers} disabled={classifying} className="bg-blue-600 hover:bg-blue-700">
-            <Download className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
-            Download Vouchers
+            <Download className="w-4 h-4 mr-2" />
+              Generate Vouchers
           </Button>
           {/* --- END OF ADDITION --- */}
         <Button onClick={() => runClassification(true)} disabled={classifying}>
@@ -1820,6 +1824,7 @@ const StatementDetailsPage = () => {
         isOpen={isVoucherModalOpen}
         onClose={() => setIsVoucherModalOpen(false)}
         data={voucherData}
+        statementId={statementId}
       />
       {/* --- END OF ADDITION --- */}
     </div>

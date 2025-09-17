@@ -6,7 +6,9 @@ from sqlalchemy import select, func, outerjoin
 from sqlalchemy.orm import selectinload # <-- ADD THIS
 from typing import List, Dict, Optional, Any, Union, Tuple
 
-
+import openpyxl
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -34,6 +36,7 @@ from typing import List, Dict, Optional, Any, Union
 import uuid
 from datetime import datetime, timezone
 import pandas as pd
+from pandas import NaT
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
@@ -257,6 +260,13 @@ class DashboardStats(BaseModel):
     statements_processed: int
     regex_patterns: int
     success_rate: float
+
+class VoucherGenerationRequest(BaseModel):
+    """Defines the user's selection for voucher export."""
+    include_receipts: bool = True
+    include_payments: bool = True
+    include_contras: bool = True
+    filename: str
 
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
@@ -918,13 +928,31 @@ def create_standardized_transaction(transaction: Dict, mapping: Dict) -> Dict:
     columns under standardized key names.
     """
     standardized = {}
-    
+    # --- START: Date Normalization Logic ---
+    raw_date_str = transaction.get(mapping.get("date_column"))
+    if raw_date_str:
+        # Use pandas for robust parsing, hinting that the day is first.
+        # errors='coerce' will return NaT (Not a Time) for unparseable dates.
+        parsed_date = pd.to_datetime(raw_date_str, dayfirst=True, errors='coerce')
+        
+        # Check if parsing was successful. pd.notna checks for NaT.
+        if pd.notna(parsed_date):
+            # Reformat to our single, consistent DD/MM/YYYY standard, stripping all time info.
+            standardized["Date"] = parsed_date.strftime('%d/%m/%Y')
+        else:
+            # If parsing fails, use the original string as a safe fallback.
+            standardized["Date"] = str(raw_date_str)
+    else:
+        standardized["Date"] = None # Handle cases where the date is missing.
+    # --- END: Date Normalization Logic ---
     # Map essential columns using the provided mapping
-    standardized["Date"] = transaction.get(mapping.get("date_column"))
     standardized["Narration"] = transaction.get(mapping.get("narration_column"))
     standardized["Amount"] = transaction.get(mapping.get("amount_column"))
-    standardized["CR/DR"] = transaction.get(mapping.get("crdr_column"))
-    
+    raw_cr_dr = transaction.get(mapping.get("crdr_column"), "")
+    # Clean and normalize it immediately
+    clean_cr_dr = str(raw_cr_dr).strip().replace(".", "").upper()
+    standardized["CR/DR"] = clean_cr_dr
+
     # Only include Balance if it was mapped by the user
     if mapping.get("balance_column"):
         standardized["Balance"] = transaction.get(mapping.get("balance_column"))
@@ -1143,83 +1171,199 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
 # --- END OF ADDITION ---
 # --- ADD THIS ENTIRE ENDPOINT ---
 
-# --- REPLACEMENT for the entire generate_vouchers function ---
+# --- ADD THIS ENTIRE HELPER FUNCTION ---
+def generate_tally_rows(vouchers: List[Dict], bank_ledger_name: str, voucher_type: str) -> List[List[Any]]:
+    """
+    Generates a list of rows in the two-line Tally format for Excel export.
+    """
+    output_rows = []
+    voucher_number = 1
+
+    for t in vouchers:
+        is_contra = voucher_type == 'Contra'
+        
+        # Safely parse amount from standardized data
+        amount = float(str(t.get('Amount', '0')).replace(',', ''))
+        
+        # Format date from standardized data
+        date_str = t.get('Date', '').split(' ')[0]
+        try:
+            formatted_date = datetime.strptime(date_str, '%d/%m/%Y').strftime('%d-%b-%Y')
+        except ValueError:
+            formatted_date = date_str
+
+        narration = t.get('Narration', '')
+        party_ledger = t.get('matched_ledger', 'Suspense')
+
+        # Line 1: The Party Ledger Entry
+        party_cr_dr = 'Dr' if is_contra else ('Cr' if voucher_type == 'Receipt' else 'Dr')
+        row1 = [
+            formatted_date, voucher_type, voucher_number, '', '', 
+            party_ledger, f"{amount:.2f}", party_cr_dr,
+            '', '', '', '', '', '', narration
+        ]
+        
+        # Line 2: The Bank Ledger Entry
+        bank_cr_dr = 'Cr' if is_contra else ('Dr' if voucher_type == 'Receipt' else 'Cr')
+        row2 = [
+            '', '', '', '', '', 
+            bank_ledger_name, f"{amount:.2f}", bank_cr_dr,
+            '', '', '', '', '', '', ''
+        ]
+        
+        output_rows.append(row1)
+        output_rows.append(row2)
+        voucher_number += 1
+        
+    return output_rows
+# --- END OF ADDITION ---
+
+# In server.py
+
+# --- FIND AND REPLACE the entire generate_vouchers function WITH THESE TWO ENDPOINTS ---
+
+@api_router.get("/vouchers/{statement_id}/summary")
+async def get_voucher_summary(statement_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Gets the counts of each voucher type to populate the download modal."""
+    
+    # --- THIS IS THE FIX ---
+    # Eagerly load the related bank_account and client to prevent session errors.
+    query = (
+        select(models.BankStatement)
+        .options(
+            selectinload(models.BankStatement.bank_account),
+            selectinload(models.BankStatement.client)
+        )
+        .where(models.BankStatement.id == statement_id)
+    )
+    result = await db.execute(query)
+    statement = result.scalar_one_or_none()
+    # --- END OF FIX ---
+
+    if not statement: raise HTTPException(status_code=404, detail="Statement not found")
+    
+    # Now we can safely access the related objects because they were pre-loaded.
+    bank_account = statement.bank_account
+    client = statement.client
+
+    if not bank_account: raise HTTPException(status_code=404, detail="Bank account not found")
+    if not client: raise HTTPException(status_code=404, detail="Client not found")
+    print("\n" + "="*50)
+    print("INSIDE GET_VOUCHER_SUMMARY")
+    print(f"  - Statement ID: {statement.id}")
+    print(f"  - Raw processed_data from DB: {statement.processed_data}")
+    
+    processed_data = statement.processed_data or []
+    
+    print(f"  - Length of processed_data list being used: {len(processed_data)}")
+    print("="*50 + "\n")
+    # --- END: TEMPORARY DIAGNOSTIC CODE ---
+    contra_list = set(bank_account.contra_list or [])
+    
+    receipts = 0
+    payments = 0
+    contras = 0
+
+    for t in processed_data:
+        cr_dr_val = str(t.get("CR/DR", "")).strip().upper()
+        ledger = t.get("matched_ledger")
+
+        if cr_dr_val.startswith("CR"):
+            receipts += 1
+        elif cr_dr_val.startswith("DR"):
+            if ledger in contra_list:
+                contras += 1
+            else:
+                payments += 1
+    
+    first_date_str = next((t.get("Date") for t in processed_data if t.get("Date")), None)
+    month_year = "vouchers"
+    if first_date_str:
+        try:
+            month_year = datetime.strptime(first_date_str.split(' ')[0], '%d/%m/%Y').strftime("%B_%Y")
+        except ValueError:
+            pass
+            
+    sanitized_ledger_name = bank_account.ledger_name.replace("/", "_").replace("\\", "_")
+    suggested_filename = f"{client.name}_{sanitized_ledger_name}_{month_year}"
+
+    return {
+        "receipt_count": receipts,
+        "payment_count": payments,
+        "contra_count": contras,
+        "suggested_filename": suggested_filename
+    }
+
 @api_router.post("/generate-vouchers/{statement_id}")
-async def generate_vouchers(statement_id: str, db: AsyncSession = Depends(database.get_db)):
-    """Sorts transactions and generates data for Tally vouchers."""
+async def generate_vouchers(statement_id: str, request: VoucherGenerationRequest, db: AsyncSession = Depends(database.get_db)):
+    """Generates a Tally-compatible XLSX file by populating a template."""
     statement = await db.get(models.BankStatement, statement_id)
-    if not statement:
-        raise HTTPException(status_code=404, detail="Statement not found")
-    if not statement.bank_account_id:
-        raise HTTPException(status_code=400, detail="Statement is not linked to a bank account. Please re-upload.")
-
+    if not statement: raise HTTPException(status_code=404, detail="Statement not found")
     bank_account = await db.get(models.BankAccount, statement.bank_account_id)
-    if not bank_account:
-        raise HTTPException(status_code=404, detail="Bank account not found")
+    if not bank_account: raise HTTPException(status_code=404, detail="Bank account not found")
 
-    client = await db.get(models.Client, statement.client_id)
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
-
-    processed_data = statement.processed_data if statement.processed_data else []
+    processed_data = statement.processed_data or []
     contra_list = set(bank_account.contra_list or [])
     bank_ledger_name = bank_account.ledger_name
     
-    crdr_column = statement.column_mapping.get("crdr_column")
-    date_column = statement.column_mapping.get("date_column")
+    # Sort data into lists
+    receipt_data, payment_data, contra_data = [], [], []
+    for t in processed_data:
+        cr_dr_val = str(t.get("CR/DR", "")).strip().upper()
+        ledger = t.get("matched_ledger")
 
-    receipt_vouchers, payment_vouchers, contra_vouchers = [], [], []
-    first_date = None
-
-    for transaction in processed_data:
-        # --- START: ROBUST CR/DR CHECK ---
-        raw_cr_dr = transaction.get(crdr_column)
-        
-        # Clean the string to handle variations like "Cr.", " cr ", "CR", etc.
-        clean_cr_dr = ""
-        if isinstance(raw_cr_dr, str):
-            clean_cr_dr = raw_cr_dr.strip().replace(".", "").upper()
-        # --- END: ROBUST CR/DR CHECK ---
-
-        ledger = transaction.get("matched_ledger", "Suspense")
-        
-        if not first_date:
-            try:
-                date_str = transaction.get(date_column)
-                if date_str:
-                    # Optional cleanup: removed deprecated 'infer_datetime_format'
-                    first_date = pd.to_datetime(date_str, dayfirst=True)
-            except Exception:
-                pass
-
-        # Use the cleaned string for comparison
-        if clean_cr_dr == "CR":
-            receipt_vouchers.append(transaction)
-        elif clean_cr_dr == "DR":
+        if cr_dr_val.startswith("CR"):
+            receipt_data.append(t)
+        elif cr_dr_val.startswith("DR"):
             if ledger in contra_list:
-                contra_vouchers.append(transaction)
+                contra_data.append(t)
             else:
-                payment_vouchers.append(transaction)
+                payment_data.append(t)
 
-    month_year = first_date.strftime("%B_%Y") if first_date else "vouchers"
-    sanitized_ledger_name = bank_ledger_name.replace("/", "_").replace("\\", "_")
-    suggested_filename = f"{client.name}_{sanitized_ledger_name}_{month_year}.csv"
+    # Load the template workbook
+    template_path = "templates/AccountingVouchers.xlsx"
+    try:
+        workbook = openpyxl.load_workbook(template_path)
+        template_sheet = workbook["Accounting Voucher"]
+    except (FileNotFoundError, KeyError):
+        raise HTTPException(status_code=500, detail="Tally template file not found or is missing 'Accounting Voucher' sheet.")
 
-    # --- START: MODERN Pydantic USAGE ---
-    # Use model_validate (replaces from_orm)
-    pydantic_statement = BankStatement.model_validate(statement)
-    # --- END: MODERN Pydantic USAGE ---
+    # Process each selected voucher type
+    if request.include_receipts and receipt_data:
+        receipt_sheet = workbook.copy_worksheet(template_sheet)
+        receipt_sheet.title = "Receipts"
+        for row in generate_tally_rows(receipt_data, bank_ledger_name, "Receipt"):
+            receipt_sheet.append(row)
 
-    return {
-        "receipt_vouchers": receipt_vouchers,
-        "payment_vouchers": payment_vouchers,
-        "contra_vouchers": contra_vouchers,
-        "suggested_filename": suggested_filename,
-        # Use model_dump (replaces dict)
-        "statement_details": pydantic_statement.model_dump(),
-        "bank_ledger_name": bank_ledger_name,
-    }
+    if request.include_payments and payment_data:
+        payment_sheet = workbook.copy_worksheet(template_sheet)
+        payment_sheet.title = "Payments"
+        for row in generate_tally_rows(payment_data, bank_ledger_name, "Payment"):
+            payment_sheet.append(row)
 
+    if request.include_contras and contra_data:
+        contra_sheet = workbook.copy_worksheet(template_sheet)
+        contra_sheet.title = "Contras"
+        for row in generate_tally_rows(contra_data, bank_ledger_name, "Contra"):
+            contra_sheet.append(row)
+    
+    # Remove the original template sheet
+    del workbook["Accounting Voucher"]
+
+    # Move the "Read Me" sheet to the very end, if it exists
+    if "Accounting Voucher (Read Me)" in workbook.sheetnames:
+        read_me_sheet = workbook["Accounting Voucher (Read Me)"]
+        workbook.move_sheet(read_me_sheet, offset=len(workbook.sheetnames))
+    
+    # Save to an in-memory buffer
+    output_buffer = io.BytesIO()
+    workbook.save(output_buffer)
+    output_buffer.seek(0)
+    
+    final_filename = f"{request.filename}.xlsx"
+    headers = {'Content-Disposition': f'attachment; filename="{final_filename}"'}
+    return StreamingResponse(output_buffer, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+# --- END OF REPLACEMENT ---
 
 @api_router.post("/ai-improve-regex")
 async def ai_improve_regex(request: AIRegexRequest):
