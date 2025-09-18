@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
@@ -1243,12 +1243,18 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 };
 
 
-// --- DEFINITIVE REPLACEMENT for ClusterCard ---
-// --- DEFINITIVE REPLACEMENT for ClusterCard ---
-// In App.js
-
-// --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
-// In App.js
+// --- ADD THIS ENTIRE CONSTANT ---
+const REGEX_BUILDING_BLOCKS = [
+  { label: "Starts With", snippet: "^", description: "the start of the line" },
+  { label: "Ends With", snippet: "$", description: "the end of the line" },
+  { label: "Word Boundary", snippet: "\\b", description: "a word boundary" },
+  { label: "Any Digit", snippet: "\\d", description: "any single digit (0-9)" },
+  { label: "One or More Digits", snippet: "\\d+", description: "one or more digits" },
+  { label: "Any Letter", snippet: "[A-Za-z]", description: "any single letter (a-z)" },
+  { label: "One or More Letters", snippet: "[A-Za-z]+", description: "one or more letters" },
+  { label: "Anything", snippet: ".*", description: "any character, zero or more times" },
+];
+// --- END OF ADDITION ---
 
 // --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
 const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense }) => {
@@ -1261,6 +1267,59 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     highlightedNarrations: []
   });
   const [falsePositiveCount, setFalsePositiveCount] = useState(0);
+  
+  // New state for the regex helpers
+  const [showHelpers, setShowHelpers] = useState(false);
+  const regexInputRef = useRef(null);
+
+  const handleInsertSnippet = (snippet) => {
+    const input = regexInputRef.current;
+    if (!input) return;
+
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const text = input.value;
+    
+    const newText = text.substring(0, start) + snippet + text.substring(end);
+    setEditableRegex(newText);
+
+    // Focus the input and move the cursor to the end of the inserted snippet
+    input.focus();
+    setTimeout(() => {
+      input.setSelectionRange(start + snippet.length, start + snippet.length);
+    }, 0);
+  };
+
+  const decodeRegex = (regex) => {
+    if (!regex || !regex.trim()) return [];
+
+    // Split the pattern by the "anything" wildcard to get the keywords.
+    const keywordParts = regex.split(/\.\*/).filter(Boolean);
+
+    if (keywordParts.length === 0) {
+      return [[{ type: 'error', text: "Cannot decode this pattern type." }]];
+    }
+
+    const explanation = [];
+
+    // Process the first keyword
+    const firstKeyword = keywordParts[0].replace(/\\b/g, '').trim();
+    explanation.push([
+      { type: 'start', text: 'The text must contain the word ' },
+      { type: 'keyword', text: `"${firstKeyword}"` }
+    ]);
+
+    // Process subsequent keywords
+    for (let i = 1; i < keywordParts.length; i++) {
+      const subsequentKeyword = keywordParts[i].replace(/\\b/g, '').trim();
+      explanation.push([
+        { type: 'connector', text: '   followed (anywhere later) by the word ' },
+        { type: 'keyword', text: `"${subsequentKeyword}"` }
+      ]);
+    }
+
+    return explanation;
+  };
 
   useEffect(() => {
     const testRegex = (regexStr, text) => {
@@ -1353,7 +1412,68 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         </div>
       </div>
       
-      <Input className="font-mono text-xs bg-white" value={editableRegex} onChange={(e) => setEditableRegex(e.target.value)} placeholder="Enter Regex Pattern..." />
+      <div>
+        <div className="flex items-center gap-2">
+          <Input
+            ref={regexInputRef}
+            className="font-mono text-xs bg-white flex-grow"
+            value={editableRegex}
+            onChange={(e) => setEditableRegex(e.target.value)}
+            placeholder="Enter Regex Pattern..."
+          />
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="icon" className="h-9 w-9 flex-shrink-0" title="Decode Regex">
+                <Brain className="h-4 w-4" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader><DialogTitle>Regex Decoder</DialogTitle></DialogHeader>
+              <div className="mt-4 p-4 bg-slate-800 text-slate-200 rounded-md font-mono text-sm">
+              <p className="font-bold text-white">Your Pattern:</p>
+              <p className="break-words text-slate-300">{editableRegex}</p>
+              <Separator className="my-3 bg-slate-600" />
+              <p className="font-bold text-white">Explanation:</p>
+              <div>
+                {decodeRegex(editableRegex).map((line, lineIndex) => (
+                  <div key={lineIndex}>
+                    {line.map((part, partIndex) => (
+                      <span key={partIndex} className={
+                        part.type === 'keyword' ? 'text-teal-300' :
+                        part.type === 'connector' ? 'text-slate-400' :
+                        'text-slate-300' // Default/start text color
+                      }>
+                        {part.text}
+                      </span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+            </DialogContent>
+          </Dialog>
+          <Button variant="outline" size="icon" className="h-9 w-9 flex-shrink-0" title="Regex Helpers" onClick={() => setShowHelpers(!showHelpers)}>
+            <Zap className="h-4 w-4" />
+          </Button>
+        </div>
+        
+         {/* This is the smoothly animating ribbon */}
+        <div 
+          className={`
+            transition-all duration-300 ease-in-out overflow-hidden
+            ${showHelpers 
+              ? 'max-h-40 mt-2 p-2 border rounded-md bg-slate-100 flex flex-wrap gap-2' 
+              : 'max-h-0 mt-0 p-0 border-none invisible'
+            }
+          `}
+        >
+          {REGEX_BUILDING_BLOCKS.map(block => (
+            <Button key={block.label} size="sm" variant="outline" className="bg-white" onClick={() => handleInsertSnippet(block.snippet)} title={block.description}>
+              {block.label}
+            </Button>
+          ))}
+        </div>
+      </div>
 
       {falsePositiveCount > 0 && (
         <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
