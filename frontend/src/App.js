@@ -1251,7 +1251,7 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 // In App.js
 
 // --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, narrationColumnName, onMarkAsSuspense }) => {
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense }) => {
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1263,8 +1263,6 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
   const [falsePositiveCount, setFalsePositiveCount] = useState(0);
 
   useEffect(() => {
-    if (!narrationColumnName) return;
-
     const testRegex = (regexStr, text) => {
       if (!text) return false;
       try { return new RegExp(regexStr, 'i').test(text); } catch (e) { return false; }
@@ -1292,7 +1290,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     }
     setFalsePositiveCount(fpCount);
 
-    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t[narrationColumnName]));
+    const newHighlightedResults = cluster.transactions.map(t => getHighlightedHtml(editableRegex, t.Narration));
     const currentMatchCount = newHighlightedResults.filter(result => result.matched).length;
 
     let status = 'none';
@@ -1304,8 +1302,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       matchCount: currentMatchCount,
       highlightedNarrations: newHighlightedResults.map(result => result.html)
     });
-
-  }, [editableRegex, cluster.transactions, otherNarrations, narrationColumnName]);
+  }, [editableRegex, cluster.transactions, otherNarrations]);
 
   const handleCreateRule = async () => {
     if (!ledgerName.trim()) { toast.error("Ledger name is required."); return; }
@@ -1319,7 +1316,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         client_id: clientId,
         ledger_name: ledgerName,
         regex_pattern: editableRegex,
-        sample_narrations: cluster.transactions.map(t => t[narrationColumnName]),
+        sample_narrations: cluster.transactions.map(t => t.Narration),
       };
       await axios.post(`${API}/ledger-rules`, payload);
       toast.success(`Rule for "${ledgerName}" created!`);
@@ -1371,8 +1368,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         <div className="text-xs space-y-2">
           {cluster.transactions.map((transaction, i) => {
             const rawCrDr = transaction['CR/DR'] || '';
-            const isCredit = rawCrDr.trim().replace(/\./g, '').toUpperCase() === 'CR';
-            
+            const isCredit = (transaction['CR/DR'] || '').startsWith('CR');
             return (
               <div key={i} className="flex items-center justify-between gap-1 p-1 group">
                 <div className="flex-shrink-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1385,12 +1381,16 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
                 </div>
 
                 <div className="truncate flex-grow" dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} />
-                
+                <Badge variant="outline" className="font-mono">{formatCurrency(transaction.Amount)}</Badge>
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <Badge className={`h-5 font-semibold ${isCredit ? 'bg-green-100 text-green-800 border-green-200' : 'bg-red-100 text-red-800 border-red-200'}`}>
+                  <Badge 
+                    className={`h-5 font-semibold border-0 bg-slate-800 ${isCredit 
+                      ? 'text-green-400' 
+                      : 'text-red-400'}`}
+                  >
                     {isCredit ? 'Credit' : 'Debit'}
                   </Badge>
-                  <Badge variant="outline" className="font-mono">{formatCurrency(transaction['Amount (INR)'])}</Badge>
+                  
                 </div>
               </div>
             );
@@ -1515,24 +1515,39 @@ const StatementDetailsPage = () => {
   const [classifying, setClassifying] = useState(false);
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
   const [voucherData, setVoucherData] = useState(null);
+  const [isStateDirty, setIsStateDirty] = useState(false);
   const [detachedTransactions, setDetachedTransactions] = useState([]);
 
-  
-  
-  // --- SIMPLIFIED runClassification ---
-    const runClassification = useCallback(async (isForced = false) => {
-      if (isForced) {
-      setDetachedTransactions([]);
-    }
+  // --- START: NEW UNIFIED DATA PROCESSING ---
+  const runClassification = useCallback(async (isForced = false) => {
     setClassifying(true);
     try {
-      // Add the force_reclassify parameter if this is a forced action.
       const url = isForced 
         ? `${API}/classify-transactions/${statementId}?force_reclassify=true`
         : `${API}/classify-transactions/${statementId}`;
       
       const response = await axios.post(url);
-      setClassificationResult(response.data);
+
+      // Add a temporary, unique frontend ID to every transaction object for reliable state updates.
+      let counter = 0;
+      const tagWithId = (t) => ({ ...t, _tempId: counter++ });
+
+      const taggedClassified = response.data.classified_transactions.map(tagWithId);
+      const taggedClusters = response.data.unmatched_clusters.map(cluster => ({
+        ...cluster,
+        transactions: cluster.transactions.map(tagWithId)
+      }));
+
+      setClassificationResult({
+        ...response.data,
+        classified_transactions: taggedClassified,
+        unmatched_clusters: taggedClusters
+      });
+      
+      if (isForced) {
+        setDetachedTransactions([]); // Clear detached items on a forced re-classify
+      }
+
     } catch (error) {
       toast.error("Failed to run classification.");
     } finally {
@@ -1540,114 +1555,86 @@ const StatementDetailsPage = () => {
     }
   }, [statementId]);
 
-  // --- SIMPLIFIED handleFlagAsIncorrect ---
-    // --- ADD THIS NEW HELPER FUNCTION FIRST ---
-  const saveClassificationState = async (newClassificationResult) => {
-    if (!newClassificationResult) return;
+  const saveClassificationState = async (resultToSave) => {
+    if (!resultToSave) return;
+    
+    // Create a "clean" version of the data by removing our temporary IDs before sending to backend.
+    const cleanData = resultToSave.classified_transactions.map(({ _tempId, ...rest }) => rest);
+
     try {
       await axios.post(`${API}/statements/${statementId}/update-transactions`, {
-        processed_data: newClassificationResult.classified_transactions,
+        processed_data: cleanData,
       });
-      // Optional: show a subtle success toast, or none at all for background saves
-      // toast.success("Progress saved!");
     } catch (error) {
-      toast.error("Failed to save progress. Please check your connection.");
+      toast.error("Failed to save progress.");
     }
   };
 
+  useEffect(() => {
+    if (isStateDirty && classificationResult) {
+      saveClassificationState(classificationResult);
+      setIsStateDirty(false);
+    }
+  }, [classificationResult, isStateDirty]);
+  // --- END: NEW UNIFIED DATA PROCESSING ---
+
+  // --- START: SIMPLIFIED HANDLER FUNCTIONS ---
   const handleMarkAsSuspense = (transactionsToMark) => {
-    const narrationColumn = statement?.column_mapping?.narration_column;
-    if (!narrationColumn) return;
-    const narrationsToMark = new Set(transactionsToMark.map(t => t[narrationColumn]));
-
-    let newResult; // To hold the new state
-    setClassificationResult(prevResult => {
-      if (!prevResult) return null;
-
-      const newClassified = prevResult.classified_transactions.map(t => {
-        if (narrationsToMark.has(t.Narration)) {
-          return { ...t, user_confirmed: true };
-        }
-        return t;
-      });
-
-      const newClusters = prevResult.unmatched_clusters.map(cluster => ({
-        ...cluster,
-        transactions: cluster.transactions.filter(t => !narrationsToMark.has(t[narrationColumn]))
-      })).filter(cluster => cluster.transactions.length > 0);
-
-      newResult = { // Assign the new state to our variable
-        ...prevResult,
-        classified_transactions: newClassified,
-        unmatched_clusters: newClusters,
-      };
-      return newResult;
-    });
-    
-    // Call the save function immediately after the state update is queued
-    setTimeout(() => saveClassificationState(newResult), 0);
+    const idsToMark = new Set(transactionsToMark.map(t => t._tempId));
+    setClassificationResult(prev => ({
+      ...prev,
+      classified_transactions: prev.classified_transactions.map(t => 
+        idsToMark.has(t._tempId) ? { ...t, user_confirmed: true } : t
+      ),
+      unmatched_clusters: prev.unmatched_clusters
+        .map(c => ({...c, transactions: c.transactions.filter(t => !idsToMark.has(t._tempId))}))
+        .filter(c => c.transactions.length > 0)
+    }));
+    setIsStateDirty(true);
     toast.info(`${transactionsToMark.length} transaction(s) marked as Suspense.`);
   };
 
-  // --- FIND AND REPLACE ONLY the handleFlagAsIncorrect function ---
   const handleFlagAsIncorrect = (transactionToFlag) => {
-    const narrationColumn = statement?.column_mapping?.narration_column;
-    if (!narrationColumn) return;
-
-    let newResult;
-    setClassificationResult(prevResult => {
-      if (!prevResult) return null;
-
-      // Step 1: Modify the state, DON'T delete.
-      // Find the transaction and reset its status to a "pending" suspense item.
-      const newClassified = prevResult.classified_transactions.map(t => {
-        if (t.Narration === transactionToFlag.Narration) {
-          const resetTransaction = { ...t };
-          resetTransaction.matched_ledger = 'Suspense';
-          delete resetTransaction.user_confirmed;
-          delete resetTransaction.matched_pattern_id;
-          return resetTransaction;
+    setClassificationResult(prev => {
+      const newClassified = prev.classified_transactions.map(t => {
+        if (t._tempId === transactionToFlag._tempId) {
+          const reset = { ...t, matched_ledger: 'Suspense' };
+          delete reset.user_confirmed;
+          return reset;
         }
         return t;
       });
-
-      // Step 2: Re-build the cluster view based on the new reality.
-      // Find the transaction we just reset.
-      const transactionToReCluster = newClassified.find(
-        t => t.Narration === transactionToFlag.Narration
-      );
-
-      // Find its original raw data for the cluster card.
-      const originalTransaction = (statement.raw_data || []).find(
-        raw => raw[narrationColumn] === transactionToReCluster.Narration
-      );
-
-      // If we found it, create a new cluster for it.
-      let newClusters = prevResult.unmatched_clusters;
-      if (originalTransaction) {
-        const newCluster = {
-          cluster_id: `flagged-${Math.random()}`,
-          transactions: [originalTransaction],
-          suggested_regex: generateSimpleRegex(originalTransaction[narrationColumn])
-
-        };
-        newClusters = [newCluster, ...prevResult.unmatched_clusters];
-      }
-
-      newResult = {
-        ...prevResult,
-        classified_transactions: newClassified,
-        unmatched_clusters: newClusters,
+      const newCluster = {
+        cluster_id: `flagged-${transactionToFlag._tempId}`,
+        transactions: [transactionToFlag], // The object itself is moved
+        suggested_regex: generateSimpleRegex(transactionToFlag.Narration)
       };
-      return newResult;
+      return {
+        ...prev,
+        classified_transactions: newClassified,
+        unmatched_clusters: [newCluster, ...prev.unmatched_clusters]
+      };
     });
-
-    // Step 3: Save the FULL, modified list back to the database.
-    setTimeout(() => saveClassificationState(newResult), 0);
-    toast.info("Transaction moved back to 'Unmatched' for review.");
+    setIsStateDirty(true);
+    toast.info("Transaction moved to 'Unmatched' for review.");
   };
-// --- END OF REPLACEMENT ---
 
+  const handleDetachTransaction = (transactionToDetach, sourceClusterId) => {
+    setClassificationResult(prev => ({
+      ...prev,
+      unmatched_clusters: prev.unmatched_clusters
+        .map(c => {
+          if (c.cluster_id === sourceClusterId) {
+            return {...c, transactions: c.transactions.filter(t => t._tempId !== transactionToDetach._tempId)};
+          }
+          return c;
+        })
+        .filter(c => c.transactions.length > 0)
+    }));
+    setDetachedTransactions(prev => [...prev, transactionToDetach]);
+    toast.info("Transaction detached.");
+  };
+  // --- END: SIMPLIFIED HANDLER FUNCTIONS ---
   // --- ADD THIS ENTIRE FUNCTION ---
   const handleGenerateVouchers = async () => {
     setClassifying(true);
@@ -1665,39 +1652,6 @@ const StatementDetailsPage = () => {
     } finally {
       setClassifying(false);
     }
-  };
-  const handleDetachTransaction = (transactionToDetach, sourceClusterId) => {
-    setClassificationResult(prevResult => {
-      // Guard against cases where there's no data
-      if (!prevResult) return null;
-
-      const newClusters = prevResult.unmatched_clusters.map(cluster => {
-        // Find the cluster that the transaction is coming from
-        if (cluster.cluster_id === sourceClusterId) {
-          // Return a new cluster object with the transaction filtered out
-          return {
-            ...cluster,
-            // Replace the incorrect id() call with a direct reference check.
-            transactions: cluster.transactions.filter(
-              t => t !== transactionToDetach 
-            ),
-          };
-        }
-        // Leave other clusters unchanged
-        return cluster;
-      }).filter(cluster => cluster.transactions.length > 0); // Remove any clusters that are now empty
-
-      // Update the main classification result state
-      return {
-        ...prevResult,
-        unmatched_clusters: newClusters,
-      };
-    });
-
-    // Add the detached transaction to our "holding pen" state
-    setDetachedTransactions(prevDetached => [...prevDetached, transactionToDetach]);
-
-    toast.info("Transaction detached from cluster.");
   };
   // --- END OF NEW HANDLER ---
   useEffect(() => {
@@ -1723,6 +1677,12 @@ const StatementDetailsPage = () => {
     }
   }, [statement, classificationResult, runClassification]);
 
+   useEffect(() => {
+    if (isStateDirty && classificationResult) {
+      saveClassificationState(classificationResult);
+      setIsStateDirty(false); // Reset the dirty flag after saving
+    }
+  }, [classificationResult, isStateDirty]); // Dependency array
 
   // --- ADD THIS LOGIC inside StatementDetailsPage, before the return statement ---
   const otherNarrations = useMemo(() => {
@@ -1731,8 +1691,6 @@ const StatementDetailsPage = () => {
         return classificationResult.classified_transactions
             .filter(t => t.matched_ledger !== 'Suspense')
             .map(t => t.Narration);
-             console.log("Generated 'otherNarrations':", narrations); // <-- ADD THIS LOG
-
     }, [classificationResult]);
 
   if (loading || !classificationResult) {
@@ -1781,7 +1739,6 @@ const StatementDetailsPage = () => {
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
                 onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
-                narrationColumnName={statement?.column_mapping?.narration_column}
               />
             ))
             // --- END OF NEW REPLACEMENT ---
@@ -1809,7 +1766,7 @@ const StatementDetailsPage = () => {
                     cluster_id: 'detached-group',
                     transactions: detachedTransactions,
                         suggested_regex: detachedTransactions.length > 0 
-      ? generateSimpleRegex(detachedTransactions[0][statement?.column_mapping?.narration_column]) 
+      ? generateSimpleRegex(detachedTransactions[0].Narration) 
       : ''
 
                 }}
@@ -1818,8 +1775,6 @@ const StatementDetailsPage = () => {
                 otherNarrations={otherNarrations}
                 onDetach={() => {}} // Detaching from this group does nothing
                 onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
-                narrationColumnName={statement?.column_mapping?.narration_column}
-
             />
           </CardContent>
         </Card>

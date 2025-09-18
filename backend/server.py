@@ -1052,24 +1052,19 @@ async def classify_transactions(
     force_reclassify: bool = Query(False, description="Force re-matching of rules against pending transactions")
 ):
     """
-    Classify transactions. This endpoint is STATE-AWARE.
-    - Default (force_reclassify=False): Fast load. Loads saved state and clusters pending items.
-    - Force (force_reclassify=True): Intelligent Merge. Re-runs rules on pending items and merges results.
+    Classify transactions. This endpoint is STATE-AWARE and now ONLY uses processed_data.
     """
     statement = await db.get(models.BankStatement, statement_id)
-
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
 
     mapping = statement.column_mapping
     narration_col = mapping.get("narration_column")
     
-    # Step 1: Establish the "base of truth" from the database.
     classified_transactions = statement.processed_data if isinstance(statement.processed_data, list) else []
 
-    # If it's the very first run, build the initial list from raw_data.
-    if not classified_transactions:
-        # This block is identical to our previous "first run" logic.
+    if not classified_transactions: # First run
+        # ... (This entire 'if not classified_transactions' block remains unchanged)
         query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
         result = await db.execute(query)
         patterns = result.scalars().all()
@@ -1087,67 +1082,51 @@ async def classify_transactions(
             if not matched:
                 standardized_transaction["matched_ledger"] = "Suspense"
                 classified_transactions.append(standardized_transaction)
-        
         statement.processed_data = classified_transactions
-        await db.commit() # Save the initial state
+        await db.commit()
         await db.refresh(statement)
 
-
-
-    # Step 2: If a re-classification is forced, perform the "Intelligent Merge".
-    if force_reclassify:
-        # A: Identify items that are eligible for re-classification.
-        items_to_recheck = [
-            t for t in classified_transactions
-            if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")
-        ]
-        
+    if force_reclassify: # Intelligent Merge
+        # ... (This entire 'if force_reclassify' block remains unchanged)
+        items_to_recheck = [t for t in classified_transactions if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")]
         if items_to_recheck:
-            # B: Fetch rules and create a map of new matches for efficiency.
             query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
             result = await db.execute(query)
             patterns = result.scalars().all()
             reclassification_updates = {}
-            
             for item in items_to_recheck:
                 for pattern in patterns:
                     if re.search(pattern.regex_pattern, item['Narration'], re.IGNORECASE):
                         reclassification_updates[item['Narration']] = pattern.ledger_name
-                        break # Found a match, move to the next item
-            
-            # C: Merge the updates back into our main list.
+                        break
             if reclassification_updates:
                 for i, t in enumerate(classified_transactions):
                     if t['Narration'] in reclassification_updates:
                         classified_transactions[i]['matched_ledger'] = reclassification_updates[t['Narration']]
-                
-                # D: Save the newly merged state back to the database.
                 statement.processed_data = classified_transactions
                 await db.commit()
                 await db.refresh(statement)
-                
 
-    # Step 3: Determine what STILL needs to be clustered after any potential updates.
-    pending_narrations_set = {
-        t['Narration'] for t in classified_transactions
-        if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")
-    }
+    # --- THIS IS THE CRITICAL CHANGE ---
+    # We now identify the transactions to cluster directly from our master list.
     transactions_to_cluster = [
-        t for t in (statement.raw_data or [])
-        if t.get(narration_col) in pending_narrations_set
+        t for t in classified_transactions
+        if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")
     ]
+    # --- END OF CHANGE ---
 
-    # Step 4: Run the full clustering orchestration on the remaining pending items.
-    pre_clusters, remaining_for_ml = await pre_cluster_by_shared_keywords(transactions_to_cluster, narration_col, db)
-    # (The rest of the clustering logic remains the same)
+    # The clustering functions will now receive standardized objects.
+    # We pass the STANDARDIZED narration key "Narration" to them.
+    pre_clusters, remaining_for_ml = await pre_cluster_by_shared_keywords(transactions_to_cluster, "Narration", db)
+    
     crdr_column = mapping.get("crdr_column")
-    debit_transactions = [t for t in remaining_for_ml if str(t.get(crdr_column,"")).strip().upper() == "DR"]
-    credit_transactions = [t for t in remaining_for_ml if str(t.get(crdr_column,"")).strip().upper() == "CR"]
-    debit_clusters = await cluster_narrations(debit_transactions, narration_col, db)
-    credit_clusters = await cluster_narrations(credit_transactions, narration_col, db)
+    debit_transactions = [t for t in remaining_for_ml if str(t.get("CR/DR","")).strip().upper() == "DR"]
+    credit_transactions = [t for t in remaining_for_ml if str(t.get("CR/DR","")).strip().upper() == "CR"]
+    
+    debit_clusters = await cluster_narrations(debit_transactions, "Narration", db)
+    credit_clusters = await cluster_narrations(credit_transactions, "Narration", db)
     final_clusters = pre_clusters + debit_clusters + credit_clusters
     
-    # Step 5: Return the final state.
     return {
         "classified_transactions": classified_transactions,
         "unmatched_clusters": final_clusters,
