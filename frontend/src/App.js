@@ -1345,7 +1345,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
           {(() => {
             const percentage = Math.round((validation.matchCount / cluster.transactions.length) * 100);
             switch (validation.matchStatus) {
-              case 'all': return <span className="text-sm font-bold text-green-600 flex items-center"><CheckCircle2 className="w-4 h-4 mr-1"/> All Match</span>;
+              case 'all': return <span className="text-sm font-bold text-green-600 flex items-center"><CheckCircle2 className="w-4 h-4 mr-1"/> All Matched</span>;
               case 'partial': return <span className="text-sm font-bold text-yellow-600">{`Partial Match [${validation.matchCount}/${cluster.transactions.length}]`}</span>;
               default: return <span className="text-sm font-bold text-red-600 flex items-center"><AlertCircle className="w-4 h-4 mr-1"/> No Match</span>;
             }
@@ -1353,7 +1353,7 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         </div>
       </div>
       
-      <Textarea className="font-mono text-xs bg-white" value={editableRegex} onChange={(e) => setEditableRegex(e.target.value)} />
+      <Input className="font-mono text-xs bg-white" value={editableRegex} onChange={(e) => setEditableRegex(e.target.value)} placeholder="Enter Regex Pattern..." />
 
       {falsePositiveCount > 0 && (
         <div className="p-3 my-2 bg-yellow-100 border-l-4 border-yellow-400 text-yellow-800 text-sm rounded-r-md flex items-center gap-3">
@@ -1364,13 +1364,12 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
 
       <p className="text-sm font-semibold">Sample Transactions ({cluster.transactions.length} items):</p>
       
-      <ScrollArea className="h-32 p-2 border rounded-md bg-white">
-        <div className="text-xs space-y-2">
+      <ScrollArea className="p-2 border rounded-md bg-white max-h-96">
+        <div className="text-xs ">
           {cluster.transactions.map((transaction, i) => {
-            const rawCrDr = transaction['CR/DR'] || '';
             const isCredit = (transaction['CR/DR'] || '').startsWith('CR');
             return (
-              <div key={i} className="flex items-center justify-between gap-1 p-1 group">
+              <div key={i} className="flex items-center justify-between gap-2 p-1 group text-[13px] leading-snug">
                 <div className="flex-shrink-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
                    <Button variant="ghost" size="icon" className="w-6 h-6" onClick={() => onMarkAsSuspense([transaction])} title="Mark as Suspense">
                       <HelpCircle className="w-3 h-3 text-slate-500" />
