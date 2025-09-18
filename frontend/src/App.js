@@ -1245,13 +1245,13 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
 
 // --- ADD THIS ENTIRE CONSTANT ---
 const REGEX_BUILDING_BLOCKS = [
-  { label: "Starts With", snippet: "^", description: "the start of the line" },
-  { label: "Ends With", snippet: "$", description: "the end of the line" },
-  { label: "Word Boundary", snippet: "\\b", description: "a word boundary" },
+  { label: "Starts With", snippet: "^", description: "start of the line" },
+  { label: "Ends With", snippet: "$", description: "end of the line" },
+  { label: "Word Boundary", snippet: "\\b", description: "a word boundary (whole word)" },
   { label: "Any Digit", snippet: "\\d", description: "any single digit (0-9)" },
-  { label: "One or More Digits", snippet: "\\d+", description: "one or more digits" },
-  { label: "Any Letter", snippet: "[A-Za-z]", description: "any single letter (a-z)" },
-  { label: "One or More Letters", snippet: "[A-Za-z]+", description: "one or more letters" },
+  { label: "1+ Digits", snippet: "\\d+", description: "one or more digits" },
+  { label: "Any Letter", snippet: "[A-Za-z]", description: "any single letter" },
+  { label: "1+ Letters", snippet: "[A-Za-z]+", description: "one or more letters" },
   { label: "Anything", snippet: ".*", description: "any character, zero or more times" },
 ];
 // --- END OF ADDITION ---
@@ -1290,35 +1290,53 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
     }, 0);
   };
 
+  // In App.js, inside the ClusterCard component
+
+// --- FIND AND REPLACE THE ENTIRE decodeRegex FUNCTION ---
   const decodeRegex = (regex) => {
     if (!regex || !regex.trim()) return [];
 
-    // Split the pattern by the "anything" wildcard to get the keywords.
-    const keywordParts = regex.split(/\.\*/).filter(Boolean);
+    const keywordMatches = [...regex.matchAll(/\\b([A-Za-z0-9_ -]+)\\b/g)];
 
-    if (keywordParts.length === 0) {
-      return [[{ type: 'error', text: "Cannot decode this pattern type." }]];
+    if (keywordMatches.length === 0) {
+      return [[{ type: 'error', text: "Could not find any whole words to explain in this pattern." }]];
     }
 
     const explanation = [];
 
+    // --- START: MODIFIED LOGIC ---
     // Process the first keyword
-    const firstKeyword = keywordParts[0].replace(/\\b/g, '').trim();
     explanation.push([
-      { type: 'start', text: 'The text must contain the word ' },
-      { type: 'keyword', text: `"${firstKeyword}"` }
+      { type: 'intro', text: 'The text must contain ' },
+      { type: 'keyword_punctuation', text: 'the word "' },
+      { type: 'keyword_text', text: keywordMatches[0][1] },
+      { type: 'keyword_punctuation', text: '"' }
     ]);
 
-    // Process subsequent keywords
-    for (let i = 1; i < keywordParts.length; i++) {
-      const subsequentKeyword = keywordParts[i].replace(/\\b/g, '').trim();
+    // Process all subsequent keywords
+    for (let i = 1; i < keywordMatches.length; i++) {
       explanation.push([
-        { type: 'connector', text: '   followed (anywhere later) by the word ' },
-        { type: 'keyword', text: `"${subsequentKeyword}"` }
+        { type: 'connector', text: '   followed (anywhere later) by ' },
+        { type: 'keyword_punctuation', text: 'the word "' },
+        { type: 'keyword_text', text: keywordMatches[i][1] },
+        { type: 'keyword_punctuation', text: '"' }
       ]);
     }
-
+    // --- END: MODIFIED LOGIC ---
     return explanation;
+  };
+
+  const getTokenColor = (type) => {
+    switch (type) {
+      case 'wildcard': return 'text-blue-400';
+      case 'boundary':
+      case 'anchor':
+      case 'escape': return 'text-green-400';
+      case 'literal': return 'text-orange-400';
+      case 'grouping': return 'text-purple-400';
+      case 'quantifier': return 'text-red-400';
+      default: return 'text-slate-400';
+    }
   };
 
   useEffect(() => {
@@ -1427,29 +1445,32 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
                 <Brain className="h-4 w-4" />
               </Button>
             </DialogTrigger>
-            <DialogContent>
+            <DialogContent className="max-w-2xl">
               <DialogHeader><DialogTitle>Regex Decoder</DialogTitle></DialogHeader>
-              <div className="mt-4 p-4 bg-slate-800 text-slate-200 rounded-md font-mono text-sm">
-              <p className="font-bold text-white">Your Pattern:</p>
-              <p className="break-words text-slate-300">{editableRegex}</p>
-              <Separator className="my-3 bg-slate-600" />
-              <p className="font-bold text-white">Explanation:</p>
-              <div>
-                {decodeRegex(editableRegex).map((line, lineIndex) => (
-                  <div key={lineIndex}>
-                    {line.map((part, partIndex) => (
-                      <span key={partIndex} className={
-                        part.type === 'keyword' ? 'text-teal-300' :
-                        part.type === 'connector' ? 'text-slate-400' :
-                        'text-slate-300' // Default/start text color
-                      }>
-                        {part.text}
-                      </span>
-                    ))}
-                  </div>
-                ))}
+              
+              {/* --- START: FINAL DECODER DISPLAY --- */}
+              <div className="mt-2 p-4 bg-slate-800 text-slate-300 rounded-md font-mono text-sm">
+                <p className="font-bold text-white">Your Pattern:</p>
+                <p className="break-words text-slate-400 mb-3">{editableRegex}</p>
+                <p className="font-bold text-white">Explanation:</p>
+                <div className="mt-2">
+                  {decodeRegex(editableRegex).map((line, lineIndex) => (
+                    <div key={lineIndex}>
+                      {line.map((part, partIndex) => (
+                        <span key={partIndex} className={
+                          part.type === 'keyword_text' ? 'text-green-400 font-bold' :
+                          part.type === 'keyword_punctuation' ? 'text-pink-400 font-semibold' :
+                          part.type === 'connector' ? 'text-amber-400' :
+                          'text-slate-300'
+                        }>
+                          {part.text}
+                        </span>
+                      ))}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
+              {/* --- END: FINAL DECODER DISPLAY --- */}
             </DialogContent>
           </Dialog>
           <Button variant="outline" size="icon" className="h-9 w-9 flex-shrink-0" title="Regex Helpers" onClick={() => setShowHelpers(!showHelpers)}>
