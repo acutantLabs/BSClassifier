@@ -112,3 +112,24 @@ class DevaluedKeyword(Base):
     id = Column(Integer, primary_key=True, index=True)
     keyword = Column(String, nullable=False, unique=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class KnownLedger(Base):
+    """
+    Stores curated ledger information and transaction samples imported from a
+    Tally Day Book export, specific to a client.
+    """
+    __tablename__ = 'known_ledgers'
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    client_id = Column(String, ForeignKey('clients.id'), nullable=False)
+    ledger_name = Column(String, nullable=False, index=True)
+
+    # A JSON array of sample objects, e.g.,
+    # [{"narration": "...", "amount": 123.45, "type": "Debit"}, ...]
+    samples = Column(JSON, nullable=False, default=[])
+
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    # Define a relationship back to the client
+    client = relationship("Client")

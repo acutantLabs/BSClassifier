@@ -270,6 +270,23 @@ class VoucherGenerationRequest(BaseModel):
     include_contras: bool = True
     filename: str
 
+class KnownLedgerSummary(BaseModel):
+    """A summary of a known ledger for listing purposes."""
+    id: str
+    ledger_name: str
+    sample_count: int
+
+class SampleModel(BaseModel):
+    """Defines the structure of a single transaction sample."""
+    narration: str
+    amount: float
+    type: str # "Credit" or "Debit"
+
+class PaginatedSamplesResponse(BaseModel):
+    """Response model for paginated samples."""
+    total_samples: int
+    samples: List[SampleModel]
+
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
     """Detect potential date columns"""
@@ -1657,6 +1674,179 @@ async def add_devalued_keyword(keyword_data: KeywordCreate, db: AsyncSession = D
     return {"message": "Keyword added successfully", "keyword": keyword}
     
 # --- END OF NEW ENDPOINT BLOCK ---
+# --- ADD THIS ENTIRE BLOCK OF NEW ENDPOINTS ---
+
+# Tally Ledger History Management
+@api_router.post("/clients/{client_id}/upload-ledger-history")
+async def upload_ledger_history(client_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(database.get_db)):
+    """
+    Parses a Tally Day Book export (Excel format), extracts ledger and narration
+    data, and intelligently merges it with existing known ledger data.
+    """
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="Only Excel files are supported")
+
+    try:
+        content = await file.read()
+        df = pd.read_excel(io.BytesIO(content), header=None)
+
+        grouped_samples = defaultdict(list)
+        
+        # Iterate through the DataFrame rows
+        for i, row in df.iterrows():
+            # A transaction starts on a row with a valid date in the first column
+            if pd.notna(row.iloc[0]) and isinstance(row.iloc[0], (datetime, pd.Timestamp)):
+                if i + 1 < len(df): # Ensure there is a next row for the narration
+                    
+                    ledger_name = str(row.iloc[2]).strip()
+                    narration = str(df.iloc[i + 1].iloc[2]).strip()
+                    
+                    debit_val = pd.to_numeric(row.iloc[4], errors='coerce')
+                    credit_val = pd.to_numeric(row.iloc[5], errors='coerce')
+
+                    amount = 0.0
+                    trans_type = None
+
+                    if pd.notna(debit_val) and debit_val > 0:
+                        amount = debit_val
+                        trans_type = "Debit"
+                    elif pd.notna(credit_val) and credit_val > 0:
+                        amount = credit_val
+                        trans_type = "Credit"
+                    
+                    if ledger_name and narration and trans_type:
+                        sample = {
+                            "narration": narration,
+                            "amount": float(amount),
+                            "type": trans_type
+                        }
+                        grouped_samples[ledger_name].append(sample)
+        
+        if not grouped_samples:
+            raise HTTPException(status_code=400, detail="No valid ledger data found in the uploaded file. Please check the format.")
+
+        # --- Database Merging Logic ---
+        MAX_SAMPLES_PER_LEDGER = 25000
+        new_ledgers_created = 0
+        ledgers_updated = 0
+
+        for ledger_name, new_samples in grouped_samples.items():
+            # Find if this ledger already exists for the client
+            query = select(models.KnownLedger).where(
+                (models.KnownLedger.client_id == client_id) &
+                (models.KnownLedger.ledger_name == ledger_name)
+            )
+            result = await db.execute(query)
+            db_ledger = result.scalar_one_or_none()
+
+            if not db_ledger:
+                db_ledger = models.KnownLedger(
+                    client_id=client_id,
+                    ledger_name=ledger_name,
+                    samples=[]
+                )
+                db.add(db_ledger)
+                new_ledgers_created += 1
+            else:
+                ledgers_updated += 1
+            
+            # Use a set for efficient de-duplication
+            existing_fingerprints = {f"{s['narration']}|{s['amount']}|{s['type']}" for s in db_ledger.samples}
+            
+            unique_new_samples = []
+            for sample in new_samples:
+                fingerprint = f"{sample['narration']}|{sample['amount']}|{sample['type']}"
+                if fingerprint not in existing_fingerprints:
+                    unique_new_samples.append(sample)
+                    existing_fingerprints.add(fingerprint)
+            
+            # Combine and apply FIFO cap
+            combined_samples = db_ledger.samples + unique_new_samples
+            if len(combined_samples) > MAX_SAMPLES_PER_LEDGER:
+                combined_samples = combined_samples[-MAX_SAMPLES_PER_LEDGER:] # Keep the newest
+            
+            db_ledger.samples = combined_samples
+        
+        await db.commit()
+
+        return {
+            "message": "Ledger history uploaded and merged successfully.",
+            "ledgers_found": len(grouped_samples),
+            "new_ledgers_created": new_ledgers_created,
+            "existing_ledgers_updated": ledgers_updated
+        }
+
+    except Exception as e:
+        await db.rollback()
+        logging.error(f"Tally history upload error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
+@api_router.get("/clients/{client_id}/known-ledgers", response_model=List[str])
+async def get_known_ledgers_for_client(client_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Gets a simple, distinct list of known ledger names for a client."""
+    query = select(models.KnownLedger.ledger_name).where(models.KnownLedger.client_id == client_id).distinct().order_by(models.KnownLedger.ledger_name)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+@api_router.get("/clients/{client_id}/known-ledgers/summary", response_model=List[KnownLedgerSummary])
+async def get_known_ledgers_summary(client_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Gets a summary of all known ledgers for a client, including their sample counts."""
+    query = select(
+        models.KnownLedger.id,
+        models.KnownLedger.ledger_name,
+        func.json_array_length(models.KnownLedger.samples).label("sample_count")
+    ).where(models.KnownLedger.client_id == client_id).order_by(models.KnownLedger.ledger_name)
+    
+    result = await db.execute(query)
+    # Use .mappings() to get dict-like rows
+    return [KnownLedgerSummary(**row) for row in result.mappings().all()]
+
+
+@api_router.get("/known-ledgers/{ledger_id}/samples", response_model=PaginatedSamplesResponse)
+async def get_ledger_samples(ledger_id: str, page: int = Query(1, ge=1), limit: int = Query(100, ge=1, le=500), db: AsyncSession = Depends(database.get_db)):
+    """Gets a paginated list of samples for a specific known ledger."""
+    db_ledger = await db.get(models.KnownLedger, ledger_id)
+    if not db_ledger:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+
+    all_samples = db_ledger.samples
+    total_samples = len(all_samples)
+    
+    # Paginate in Python
+    start_index = (page - 1) * limit
+    end_index = start_index + limit
+    paginated_samples = all_samples[start_index:end_index]
+
+    return PaginatedSamplesResponse(
+        total_samples=total_samples,
+        samples=paginated_samples
+    )
+
+@api_router.delete("/known-ledgers/{ledger_id}/samples")
+async def delete_ledger_sample(ledger_id: str, sample_to_delete: SampleModel, db: AsyncSession = Depends(database.get_db)):
+    """Deletes a specific sample from a known ledger's sample list."""
+    db_ledger = await db.get(models.KnownLedger, ledger_id)
+    if not db_ledger:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+
+    original_count = len(db_ledger.samples)
+    
+    # Find and remove the matching sample
+    # Note: This relies on exact match of the pydantic model
+    sample_dict = sample_to_delete.dict()
+    updated_samples = [s for s in db_ledger.samples if s != sample_dict]
+    
+    if len(updated_samples) == original_count:
+        raise HTTPException(status_code=404, detail="Sample not found in ledger")
+
+    db_ledger.samples = updated_samples
+    await db.commit()
+
+    return {"message": "Sample deleted successfully."}
+
+# --- END OF NEW ENDPOINTS BLOCK ---
 #Include any new endpoints above this line
 # Include the router in the main app
 app.include_router(api_router)

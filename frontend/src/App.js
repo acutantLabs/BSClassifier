@@ -966,37 +966,46 @@ const ClientManagement = () => {
 // In App.js
 
 // --- REPLACE the entire existing ClientDetailsPage component with this ---
+// --- FIND AND REPLACE THE ENTIRE ClientDetailsPage COMPONENT ---
 const ClientDetailsPage = () => {
   const { clientId } = useParams();
   const [client, setClient] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
-  const [statements, setStatements] = useState([]); // State for statements
-  const [statementToDelete, setStatementToDelete] = useState(null); // State for delete confirmation
+  const [statements, setStatements] = useState([]);
+  const [statementToDelete, setStatementToDelete] = useState(null);
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        const clientRes = await axios.get(`${API}/clients/${clientId}`);
-        setClient(clientRes.data);
+  // New state for Tally ledger history
+  const [knownLedgers, setKnownLedgers] = useState([]);
+  const [showUploadModal, setShowUploadModal] = useState(false);
 
-        const accountsRes = await axios.get(`${API}/clients/${clientId}/bank-accounts`);
-        setBankAccounts(accountsRes.data);
-        
-        // Fetch statements for the client
-        const statementsRes = await axios.get(`${API}/clients/${clientId}/statements`);
-        setStatements(statementsRes.data);
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const clientRes = await axios.get(`${API}/clients/${clientId}`);
+      setClient(clientRes.data);
 
-      } catch (error) {
-        toast.error("Failed to fetch client details.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchData();
+      const accountsRes = await axios.get(`${API}/clients/${clientId}/bank-accounts`);
+      setBankAccounts(accountsRes.data);
+      
+      const statementsRes = await axios.get(`${API}/clients/${clientId}/statements`);
+      setStatements(statementsRes.data);
+      
+      // Fetch known ledgers summary
+      const ledgersRes = await axios.get(`${API}/clients/${clientId}/known-ledgers/summary`);
+      setKnownLedgers(ledgersRes.data);
+
+    } catch (error) {
+      toast.error("Failed to fetch client details.");
+    } finally {
+      setLoading(false);
+    }
   }, [clientId]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const handleAccountCreated = (newAccount) => {
     setBankAccounts(prev => [...prev, newAccount]);
@@ -1008,31 +1017,58 @@ const ClientDetailsPage = () => {
     try {
       await axios.delete(`${API}/statements/${statementToDelete.id}`);
       toast.success(`Statement "${statementToDelete.filename}" deleted.`);
-      // Update UI instantly
       setStatements(prev => prev.filter(s => s.id !== statementToDelete.id));
-      setStatementToDelete(null); // Close the dialog
+      setStatementToDelete(null);
     } catch (error) {
       toast.error("Failed to delete statement.");
     }
   };
 
-  if (loading) {
-    return <div>Loading client details...</div>;
-  }
-
-  if (!client) {
-    return <div>Client not found.</div>;
-  }
+  if (loading) return <div>Loading client details...</div>;
+  if (!client) return <div>Client not found.</div>;
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-slate-900">{client.name}</h1>
-        <p className="text-slate-600 mt-2">Manage client statements and bank accounts.</p>
+        <p className="text-slate-600 mt-2">Manage client statements, accounts, and ledger history.</p>
       </div>
+      
+      {/* Tally Ledger History Card - ADDED */}
+      <Card className="border-0 shadow-sm">
+        <CardHeader>
+          <CardTitle>Tally Ledger History</CardTitle>
+          <CardDescription>Upload and manage the curated list of ledgers and sample narrations from Tally.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex justify-end mb-4">
+            <Button onClick={() => setShowUploadModal(true)}>
+              <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
+            </Button>
+          </div>
+          <div className="space-y-3">
+            {knownLedgers.length > 0 ? (
+              knownLedgers.map(ledger => (
+                <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
+                  <div className="p-4 border rounded-lg flex justify-between items-center hover:bg-slate-50 transition-colors">
+                    <p className="font-semibold text-slate-800">{ledger.ledger_name}</p>
+                    <div className="flex items-center gap-4">
+                      <Badge variant="outline">{ledger.sample_count} samples</Badge>
+                      <ChevronRight className="w-5 h-5 text-slate-400" />
+                    </div>
+                  </div>
+                </Link>
+              ))
+            ) : (
+              <p className="text-center text-slate-500 py-4">No Tally ledger history has been uploaded yet.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
       
       {/* Processed Statements Card */}
       <Card className="border-0 shadow-sm">
+        {/* ... (The content of this card remains exactly the same) ... */}
         <CardHeader>
           <CardTitle>Processed Statements</CardTitle>
           <CardDescription>Review or delete processed statements for this client.</CardDescription>
@@ -1109,6 +1145,7 @@ const ClientDetailsPage = () => {
       
       {/* Bank Accounts Card */}
       <Card className="border-0 shadow-sm">
+        {/* ... (The content of this card remains exactly the same) ... */}
         <CardHeader>
           <CardTitle>Bank Accounts</CardTitle>
           <CardDescription>Manage the bank accounts associated with this client.</CardDescription>
@@ -1138,7 +1175,6 @@ const ClientDetailsPage = () => {
         </CardContent>
       </Card>
       
-      {/* Add/Edit Bank Account Modal */}
       <AddBankAccountModal
         isOpen={showAddAccountModal}
         onClose={() => setShowAddAccountModal(false)}
@@ -1146,8 +1182,19 @@ const ClientDetailsPage = () => {
         onSuccess={handleAccountCreated}
       />
 
-      {/* Delete Confirmation Dialog */}
+      {/* Tally Upload Modal - ADDED */}
+      <TallyUploadModal 
+        isOpen={showUploadModal}
+        onClose={() => setShowUploadModal(false)}
+        clientId={clientId}
+        onSuccess={() => {
+            setShowUploadModal(false);
+            fetchData(); // Re-fetch all data to update the summary list
+        }}
+      />
+
       <Dialog open={!!statementToDelete} onOpenChange={(isOpen) => !isOpen && setStatementToDelete(null)}>
+        {/* ... (The content of this dialog remains exactly the same) ... */}
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Are you absolutely sure?</DialogTitle>
@@ -1166,7 +1213,114 @@ const ClientDetailsPage = () => {
   );
 };
 // --- END OF REPLACEMENT ---
+// --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
+const TallyUploadModal = ({ isOpen, onClose, clientId, onSuccess }) => {
+  const [file, setFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
 
+  const handleFileChange = (event) => {
+    if (event.target.files && event.target.files.length > 0) {
+      setFile(event.target.files[0]);
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!file) {
+      toast.error("Please select a file to upload.");
+      return;
+    }
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await axios.post(`${API}/clients/${clientId}/upload-ledger-history`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      toast.success(response.data.message);
+      onSuccess();
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || "Failed to upload Tally history.";
+      toast.error(errorMessage);
+    } finally {
+      setIsUploading(false);
+      setFile(null); // Reset file input
+    }
+  };
+  
+  // Clean up when modal closes
+  const handleClose = () => {
+    setFile(null);
+    setShowHelp(false);
+    onClose();
+  }
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Upload Tally Day Book</DialogTitle>
+          <DialogDescription>
+            Upload the exported Excel file to populate the known ledgers and samples.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="py-4 space-y-4">
+          <div>
+            <Label>Tally Export File (.xlsx)</Label>
+            <div className="flex items-center gap-2 mt-2">
+              <Input type="file" accept=".xlsx,.xls" onChange={handleFileChange} />
+              <Button variant="outline" size="icon" onClick={() => setShowHelp(true)}>
+                <HelpCircle className="w-4 h-4" />
+              </Button>
+            </div>
+             {file && <p className="text-sm text-slate-500 mt-2">Selected: {file.name}</p>}
+          </div>
+        </div>
+        <div className="flex justify-end gap-4 pt-4 border-t">
+          <Button variant="outline" onClick={handleClose}>Cancel</Button>
+          <Button onClick={handleUpload} disabled={isUploading || !file}>
+            {isUploading ? <><RefreshCw className="w-4 h-4 mr-2 animate-spin" />Uploading...</> : "Upload File"}
+          </Button>
+        </div>
+        
+        {/* Tally Configuration Help Dialog */}
+        <Dialog open={showHelp} onOpenChange={setShowHelp}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>Tally Export Configuration</DialogTitle>
+              <DialogDescription>
+                To get the correct format, please use these settings when exporting the Day Book report from Tally.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid grid-cols-2 gap-6 mt-4 items-start">
+              <div className="space-y-3">
+                <h3 className="font-semibold">Key Settings:</h3>
+                <ul className="list-disc list-inside space-y-1 text-sm">
+                  <li><strong>Report Type:</strong> Ledger Accounts</li>
+                  <li><strong>Show Narrations:</strong> Yes</li>
+                  <li><strong>Format of Report:</strong> Condensed</li>
+                  <li><strong>Show Voucher No:</strong> No (Recommended)</li>
+                  <li><strong>File Format:</strong> Excel (Spreadsheet)</li>
+                </ul>
+                <p className="text-xs text-slate-500 pt-4">
+                  Ensure all other "Show..." options are generally set to "No" to produce the cleanest output file for parsing.
+                </p>
+              </div>
+              <div className="border rounded-lg overflow-hidden">
+                <img src="/tally-config.png" alt="Tally Configuration Screen" className="w-full h-auto" />
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+      </DialogContent>
+    </Dialog>
+  );
+};
+// --- END OF NEW MODAL COMPONENT ---
 
 // --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
 
@@ -2045,6 +2199,155 @@ const StatementDetailsPage = () => {
 };
 
 // --- END OF NEW COMPONENT ---
+// --- ADD THIS ENTIRE NEW PAGE COMPONENT ---
+const LedgerSamplesPage = () => {
+  const { clientId, ledgerId } = useParams();
+  const [ledger, setLedger] = useState(null);
+  const [samples, setSamples] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalSamples, setTotalSamples] = useState(0);
+  const [sampleToDelete, setSampleToDelete] = useState(null);
+  const limit = 100;
+
+  const fetchSamples = useCallback(async (currentPage) => {
+    setLoading(true);
+    try {
+      const response = await axios.get(`${API}/known-ledgers/${ledgerId}/samples?page=${currentPage}&limit=${limit}`);
+      const { samples, total_samples } = response.data;
+      
+      // Since our ledger name isn't in this response, we can get it from the client summary
+      if (!ledger) {
+        const summaryRes = await axios.get(`${API}/clients/${clientId}/known-ledgers/summary`);
+        const currentLedger = summaryRes.data.find(l => l.id === ledgerId);
+        setLedger(currentLedger);
+      }
+
+      setSamples(samples);
+      setTotalSamples(total_samples);
+      setTotalPages(Math.ceil(total_samples / limit));
+      setPage(currentPage);
+    } catch (error) {
+      toast.error("Failed to fetch ledger samples.");
+    } finally {
+      setLoading(false);
+    }
+  }, [ledgerId, clientId, ledger]);
+
+  useEffect(() => {
+    fetchSamples(1);
+  }, [fetchSamples]);
+
+  const handleDeleteSample = async () => {
+    if (!sampleToDelete) return;
+
+    // Optimistic UI update
+    const originalSamples = samples;
+    setSamples(prev => prev.filter(s => s !== sampleToDelete));
+    
+    try {
+      await axios.delete(`${API}/known-ledgers/${ledgerId}/samples`, {
+        data: sampleToDelete
+      });
+      toast.success("Sample deleted successfully.");
+      // On successful delete, re-fetch to get accurate total count
+      setTotalSamples(prev => prev - 1);
+
+    } catch (error) {
+      toast.error("Failed to delete sample.");
+      // Revert UI on failure
+      setSamples(originalSamples);
+    } finally {
+      setSampleToDelete(null); // Close the dialog
+    }
+  };
+
+  const handlePageChange = (newPage) => {
+    if (newPage >= 1 && newPage <= totalPages) {
+      fetchSamples(newPage);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">Ledger Sample Review</h1>
+        <p className="text-slate-600 mt-2">
+          Reviewing samples for: <span className="font-bold">{ledger?.ledger_name || '...'}</span> ({totalSamples} total samples)
+        </p>
+      </div>
+
+      <Card className="border-0 shadow-sm">
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-slate-50">
+                  <th className="p-3 text-left font-semibold">Narration</th>
+                  <th className="p-3 text-right font-semibold w-32">Amount</th>
+                  <th className="p-3 text-left font-semibold w-24">Type</th>
+                  <th className="p-3 text-center font-semibold w-24">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr><td colSpan="4" className="text-center p-8">Loading samples...</td></tr>
+                ) : (
+                  samples.map((sample, index) => (
+                    <tr key={index} className="border-b hover:bg-slate-50">
+                      <td className="p-3 max-w-xl truncate">{sample.narration}</td>
+                      <td className="p-3 text-right font-mono">{sample.amount.toLocaleString('en-IN')}</td>
+                      <td className="p-3">
+                        <Badge variant={sample.type === 'Credit' ? 'default' : 'destructive'} className={sample.type === 'Credit' ? 'bg-green-600' : 'bg-red-600'}>
+                          {sample.type}
+                        </Badge>
+                      </td>
+                      <td className="p-3 text-center">
+                        <Button variant="destructive" size="icon" className="h-8 w-8" onClick={() => setSampleToDelete(sample)}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+        {!loading && (
+          <div className="p-4 border-t flex items-center justify-between">
+            <span className="text-sm text-slate-600">
+              Page {page} of {totalPages}
+            </span>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => handlePageChange(page - 1)} disabled={page === 1}>Previous</Button>
+              <Button variant="outline" size="sm" onClick={() => handlePageChange(page + 1)} disabled={page === totalPages}>Next</Button>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={!!sampleToDelete} onOpenChange={() => setSampleToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Are you sure?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete this sample narration. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button variant="outline" onClick={() => setSampleToDelete(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteSample}>Confirm Delete</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+// --- END OF NEW PAGE COMPONENT ---
+
 // Navigation Component
 const Navigation = () => {
   return (
@@ -2446,6 +2749,7 @@ function App() {
             <Route path="/upload" element={<FileUpload />} />
             <Route path="/clients" element={<ClientManagement />} />
             <Route path="/patterns" element={<PatternManagementPage />} />
+            <Route path="/clients/:clientId/ledgers/:ledgerId" element={<LedgerSamplesPage />} />
             <Route path="/clients/:clientId" element={<ClientDetailsPage />} />
             <Route path="/statements/:statementId" element={<StatementDetailsPage />} />
           </Routes>
