@@ -1726,6 +1726,7 @@ const StatementDetailsPage = () => {
     // 1) Update already-classified transactions (mark confirmed + ensure ledger)
 
 
+
     for (let i = 0; i < prevClassified.length; i++) {
      
       const t = prevClassified[i];
@@ -1807,8 +1808,71 @@ const StatementDetailsPage = () => {
   };
   // --- END ADDITION ---
 
-  const handleFlagAsIncorrect = (transactionToFlag) => {
-    // ...existing code...
+  const handleFlagAsIncorrect = async (transactionToFlag) => {
+    if (!classificationResult) return;
+
+    // Work on immutable copies
+    const prevClassified = classificationResult.classified_transactions.map(t => ({ ...t }));
+    const prevClusters = classificationResult.unmatched_clusters.map(c => ({ ...c, transactions: c.transactions.map(tx => ({ ...tx })) }));
+
+    // Find the transaction in classified list (prefer _tempId)
+    const idx = prevClassified.findIndex(t => t._tempId === transactionToFlag._tempId
+      || (t.Narration === transactionToFlag.Narration && String(t.Amount) === String(transactionToFlag.Amount) && t.Date === transactionToFlag.Date)
+    );
+    if (idx === -1) {
+      toast.error("Could not locate transaction to flag as incorrect.");
+      return;
+    }
+
+    const origTx = prevClassified[idx];
+
+    // Build the version to persist: set matched_ledger -> 'Suspense' and remove user_confirmed
+    const { user_confirmed, ...restFields } = origTx;
+    const txForSave = { ...restFields, matched_ledger: 'Suspense' };
+    // Also keep any frontend temp id when showing in UI
+    const txForUI = { ...txForSave, _tempId: origTx._tempId };
+
+    // Prepare payload state to send to backend: replace the transaction in classified list with txForSave (so backend updates it)
+    const classifiedForSave = prevClassified.map((t, i) => i === idx ? txForSave : { ...t });
+
+    const saveResult = {
+      ...classificationResult,
+      classified_transactions: classifiedForSave,
+      // don't need to modify unmatched_clusters for save payload
+    };
+
+    // Prepare optimistic UI state: remove from classified list and add a small cluster containing the transaction
+    const newClassifiedUI = prevClassified.filter((_, i) => i !== idx);
+    const newCluster = {
+      cluster_id: `manual-${Date.now()}-${Math.floor(Math.random()*1000)}`,
+      suggested_regex: generateSimpleRegex(txForUI.Narration || ''),
+      transactions: [txForUI]
+    };
+    const newUnmatchedClustersUI = [newCluster, ...prevClusters];
+
+    const optimisticResult = {
+      ...classificationResult,
+      classified_transactions: newClassifiedUI,
+      unmatched_clusters: newUnmatchedClustersUI
+    };
+
+    // Apply optimistic UI
+    setClassificationResult(optimisticResult);
+
+    try {
+      // Persist the update (ensures backend updates existing entry to Suspense without user_confirmed)
+      await saveClassificationState(saveResult);
+
+      // Re-run classification on server to rebuild clusters correctly
+      await runClassification(true);
+
+      toast.success('Marked as incorrect and returned to unclassified clusters.');
+    } catch (err) {
+      console.error('handleFlagAsIncorrect error:', err);
+      // Revert UI on failure
+      setClassificationResult(classificationResult);
+      toast.error('Failed to mark transaction as incorrect. Changes were not saved.');
+    }
   };
 
   // --- ADD THIS ENTIRE FUNCTION ---

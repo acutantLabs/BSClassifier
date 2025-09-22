@@ -1158,7 +1158,6 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
         if not d:
             return ""
         s = str(d).split(' ')[0].strip()
-        # try known formats to canonicalize; fall back to lowercase raw
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
             try:
                 return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
@@ -1173,14 +1172,12 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
             s = str(a).replace(',', '').strip()
             return float(s)
         except Exception:
-            # last resort: 0.0
             try:
                 return float(re.sub(r'[^\d.-]', '', str(a)))
             except Exception:
                 return 0.0
 
     def canonical_key(tx):
-        # look for common amount keys
         amount = tx.get("Amount") if "Amount" in tx else tx.get("Amount (INR)") if "Amount (INR)" in tx else tx.get("amount") if "amount" in tx else tx.get("amt")
         return f"{_normalize_narration(tx.get('Narration') or tx.get('narration'))}||{_normalize_date(tx.get('Date') or tx.get('date'))}||{_normalize_amount(amount)}"
 
@@ -1201,6 +1198,19 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
             incoming_tx = incoming_map[key]
             # Merge: incoming fields override existing ones (but keep other fields)
             merged_tx = {**orig, **incoming_tx}
+
+            # Safety rule: if transaction is (or becomes) Suspense, ensure user_confirmed is explicitly FALSE
+            # unless the incoming payload explicitly set user_confirmed (in which case honor it).
+            if str(merged_tx.get('matched_ledger', '')).strip().lower() == 'suspense':
+                if 'user_confirmed' in incoming_tx:
+                    merged_tx['user_confirmed'] = bool(incoming_tx['user_confirmed'])
+                else:
+                    merged_tx['user_confirmed'] = False
+
+            # If incoming explicitly set user_confirmed (true/false), ensure it is honored regardless of ledger
+            elif 'user_confirmed' in incoming_tx:
+                merged_tx['user_confirmed'] = bool(incoming_tx['user_confirmed'])
+
             merged.append(merged_tx)
             processed_incoming_keys.add(key)
             updated_count += 1
@@ -1211,6 +1221,9 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
     for key, tx in incoming_map.items():
         if key in processed_incoming_keys:
             continue
+        # For new appended tx: ensure Suspense items are unconfirmed by default
+        if str(tx.get('matched_ledger', '')).strip().lower() == 'suspense' and 'user_confirmed' not in tx:
+            tx['user_confirmed'] = False
         merged.append(tx)
         appended_count += 1
 
