@@ -1119,7 +1119,6 @@ async def classify_transactions(
     # We pass the STANDARDIZED narration key "Narration" to them.
     pre_clusters, remaining_for_ml = await pre_cluster_by_shared_keywords(transactions_to_cluster, "Narration", db)
     
-    crdr_column = mapping.get("crdr_column")
     debit_transactions = [t for t in remaining_for_ml if str(t.get("CR/DR","")).strip().upper() == "DR"]
     credit_transactions = [t for t in remaining_for_ml if str(t.get("CR/DR","")).strip().upper() == "CR"]
     
@@ -1140,15 +1139,100 @@ async def classify_transactions(
 # --- ADD THIS ENTIRE ENDPOINT ---
 @api_router.post("/statements/{statement_id}/update-transactions")
 async def update_transactions(statement_id: str, request: UpdateTransactionsRequest, db: AsyncSession = Depends(database.get_db)):
-    """Updates the processed_data for a given statement."""
+    """Updates the processed_data for a given statement using a canonical-key merge to avoid duplicates."""
     statement = await db.get(models.BankStatement, statement_id)
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
-    
-    statement.processed_data = request.processed_data
+
+    existing = statement.processed_data or []
+    incoming = request.processed_data or []
+
+    def _normalize_narration(n):
+        if not n:
+            return ""
+        s = str(n).strip().lower()
+        s = re.sub(r'\s+', ' ', s)
+        return s
+
+    def _normalize_date(d):
+        if not d:
+            return ""
+        s = str(d).split(' ')[0].strip()
+        # try known formats to canonicalize; fall back to lowercase raw
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+            except Exception:
+                continue
+        return s.lower()
+
+    def _normalize_amount(a):
+        if a is None:
+            return 0.0
+        try:
+            s = str(a).replace(',', '').strip()
+            return float(s)
+        except Exception:
+            # last resort: 0.0
+            try:
+                return float(re.sub(r'[^\d.-]', '', str(a)))
+            except Exception:
+                return 0.0
+
+    def canonical_key(tx):
+        # look for common amount keys
+        amount = tx.get("Amount") if "Amount" in tx else tx.get("Amount (INR)") if "Amount (INR)" in tx else tx.get("amount") if "amount" in tx else tx.get("amt")
+        return f"{_normalize_narration(tx.get('Narration') or tx.get('narration'))}||{_normalize_date(tx.get('Date') or tx.get('date'))}||{_normalize_amount(amount)}"
+
+    # Build incoming map keyed by canonical key (last one wins for duplicates in incoming)
+    incoming_map = {}
+    for tx in incoming:
+        incoming_map[canonical_key(tx)] = tx
+
+    updated_count = 0
+    appended_count = 0
+    processed_incoming_keys = set()
+
+    # Merge: prefer updating existing entries in-place (preserve order)
+    merged = []
+    for orig in existing:
+        key = canonical_key(orig)
+        if key in incoming_map:
+            incoming_tx = incoming_map[key]
+            # Merge: incoming fields override existing ones (but keep other fields)
+            merged_tx = {**orig, **incoming_tx}
+            merged.append(merged_tx)
+            processed_incoming_keys.add(key)
+            updated_count += 1
+        else:
+            merged.append(orig)
+
+    # Append any incoming transactions that did not match existing keys
+    for key, tx in incoming_map.items():
+        if key in processed_incoming_keys:
+            continue
+        merged.append(tx)
+        appended_count += 1
+
+    # Final deduplication pass to ensure no duplicate canonical keys remain (preserve first occurrence)
+    seen = set()
+    final_list = []
+    for tx in merged:
+        k = canonical_key(tx)
+        if k in seen:
+            continue
+        seen.add(k)
+        final_list.append(tx)
+
+    statement.processed_data = final_list
     await db.commit()
-    
-    return {"message": "Transactions updated successfully"}
+
+    return {
+        "message": "Transactions merged successfully",
+        "updated": updated_count,
+        "appended": appended_count,
+        "final_count": len(final_list)
+    }
 # --- END OF ADDITION ---
 # --- ADD THIS ENTIRE ENDPOINT ---
 

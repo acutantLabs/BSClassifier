@@ -420,32 +420,30 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
 
   // useMemo will re-calculate this data only when fileData changes
   const previewData = useMemo(() => {
-  if (!fileData) {
-    return { headers: [], rows: [] };
-  }
+    if (!fileData || !Array.isArray(fileData.headers) || !Array.isArray(fileData.preview_data)) {
+      return { headers: [], rows: [] };
+    }
 
-  // Find the first empty header
-  const firstEmptyHeaderIndex = fileData.headers.findIndex(h => !h || h.trim() === '');
-  
-  // Determine the number of columns to display
-  let columnsToDisplay = firstEmptyHeaderIndex === -1 ? fileData.headers.length : firstEmptyHeaderIndex;
-  columnsToDisplay = Math.min(columnsToDisplay, MAX_PREVIEW_COLUMNS);
+    // Find the first empty header
+    const firstEmptyHeaderIndex = fileData.headers.findIndex(h => !h || String(h).trim() === '');
+    
+    // Determine the number of columns to display
+    let columnsToDisplay = firstEmptyHeaderIndex === -1 ? fileData.headers.length : firstEmptyHeaderIndex;
+    columnsToDisplay = Math.min(columnsToDisplay, MAX_PREVIEW_COLUMNS);
 
-  // Slice the headers and row data based on the calculated number
-  const slicedHeaders = fileData.headers.slice(0, columnsToDisplay);
-  const slicedRows = fileData.preview_data.map(row => {
-    // Create a new row object with only the desired columns
-    const newRow = {};
-    slicedHeaders.forEach(header => {
-      newRow[header] = row[header];
+    // Slice the headers and row data based on the calculated number
+    const slicedHeaders = fileData.headers.slice(0, columnsToDisplay);
+    const slicedRows = (fileData.preview_data || []).map(row => {
+      // Create a new row object with only the desired columns
+      const newRow = {};
+      slicedHeaders.forEach((header) => {
+        newRow[header] = row ? row[header] : undefined;
+      });
+      return newRow;
     });
-    return newRow;
-  });
 
-  return { headers: slicedHeaders, rows: slicedRows.slice(0, 5) }; // Also limit rows for preview
-}, [fileData]);
-
-// --- END OF NEW CODE BLOCK TO ADD ---
+    return { headers: slicedHeaders, rows: slicedRows.slice(0, 5) }; // Also limit rows for preview
+  }, [fileData]);
 
   useEffect(() => {
     if (fileData?.suggested_mapping) {
@@ -1716,65 +1714,103 @@ const StatementDetailsPage = () => {
       setIsStateDirty(false);
     }
   }, [classificationResult, isStateDirty]);
-  // --- END: NEW UNIFIED DATA PROCESSING ---
 
-  // --- START: SIMPLIFIED HANDLER FUNCTIONS ---
-  const handleMarkAsSuspense = (transactionsToMark) => {
-    const idsToMark = new Set(transactionsToMark.map(t => t._tempId));
-    setClassificationResult(prev => ({
-      ...prev,
-      classified_transactions: prev.classified_transactions.map(t => 
-        idsToMark.has(t._tempId) ? { ...t, user_confirmed: true } : t
-      ),
-      unmatched_clusters: prev.unmatched_clusters
-        .map(c => ({...c, transactions: c.transactions.filter(t => !idsToMark.has(t._tempId))}))
-        .filter(c => c.transactions.length > 0)
-    }));
-    setIsStateDirty(true);
-    toast.info(`${transactionsToMark.length} transaction(s) marked as Suspense.`);
+  const handleMarkAsSuspense = async (transactionsToMark) => {
+    if (!classificationResult) return;
+    const idsToUpdate = new Set(transactionsToMark.map(t => t._tempId));
+
+    // Work on immutable copies of current state
+    const prevClassified = classificationResult.classified_transactions.map(t => ({ ...t }));
+    const prevClusters = classificationResult.unmatched_clusters.map(c => ({ ...c, transactions: c.transactions.map(tx => ({ ...tx })) }));
+
+    // 1) Update already-classified transactions (mark confirmed + ensure ledger)
+
+
+    for (let i = 0; i < prevClassified.length; i++) {
+     
+      const t = prevClassified[i];
+      if (idsToUpdate.has(t._tempId)) {
+        prevClassified[i] = { ...t, matched_ledger: t.matched_ledger || 'Suspense', user_confirmed: true };
+        idsToUpdate.delete(t._tempId); // handled
+      }
+    }
+
+    // 2) Move matching transactions from clusters into classified list
+    const moved = [];
+    const newClusters = prevClusters.map(cluster => {
+      const remaining = [];
+      for (const tx of cluster.transactions) {
+        if (idsToUpdate.has(tx._tempId)) {
+          moved.push({ ...tx, matched_ledger: 'Suspense', user_confirmed: true });
+          idsToUpdate.delete(tx._tempId);
+        } else {
+          remaining.push(tx);
+        }
+      }
+      return { ...cluster, transactions: remaining };
+    }).filter(c => c.transactions.length > 0);
+
+    // Log any ids that were not found (optional debug)
+    if (idsToUpdate.size > 0) {
+      console.warn('Some transactions to mark as Suspense were not found in current state:', Array.from(idsToUpdate));
+    }
+
+    const newClassified = [...prevClassified, ...moved];
+
+    const newResult = {
+      ...classificationResult,
+      classified_transactions: newClassified,
+      unmatched_clusters: newClusters
+    };
+
+    // Optimistic UI update
+    setClassificationResult(newResult);
+
+    // Persist the exact same new state to backend
+    try {
+      await saveClassificationState(newResult);
+      toast.success(`${transactionsToMark.length} transaction(s) marked as Suspense.`);
+    } catch (err) {
+      toast.error('Failed to save Suspense changes. Changes may not be persisted.');
+      console.error('saveClassificationState error:', err);
+    }
   };
+
+  // --- ADD THIS NEW FUNCTION ---
+  const handleDetachTransaction = (transaction, clusterId) => {
+    if (!classificationResult) return;
+
+    // Remove the transaction from the matching cluster
+    const newClusters = classificationResult.unmatched_clusters
+      .map(cluster => {
+        if (cluster.cluster_id !== clusterId) return cluster;
+        return {
+          ...cluster,
+          transactions: cluster.transactions.filter(tx => tx._tempId !== transaction._tempId)
+        };
+      })
+      .filter(c => c.transactions && c.transactions.length > 0);
+
+    // Add to detachedTransactions (avoid duplicates)
+    setDetachedTransactions(prev => {
+      if (prev.some(t => t._tempId === transaction._tempId)) return prev;
+      return [...prev, transaction];
+    });
+
+    // Update UI optimistically
+    const newResult = { ...classificationResult, unmatched_clusters: newClusters };
+    setClassificationResult(newResult);
+
+    // Mark state dirty so save effect can persist if required
+    setIsStateDirty(true);
+    toast.info('Transaction detached for re-clustering.');
+  };
+  // --- END ADDITION ---
 
   const handleFlagAsIncorrect = (transactionToFlag) => {
-    setClassificationResult(prev => {
-      const newClassified = prev.classified_transactions.map(t => {
-        if (t._tempId === transactionToFlag._tempId) {
-          const reset = { ...t, matched_ledger: 'Suspense' };
-          delete reset.user_confirmed;
-          return reset;
-        }
-        return t;
-      });
-      const newCluster = {
-        cluster_id: `flagged-${transactionToFlag._tempId}`,
-        transactions: [transactionToFlag], // The object itself is moved
-        suggested_regex: generateSimpleRegex(transactionToFlag.Narration)
-      };
-      return {
-        ...prev,
-        classified_transactions: newClassified,
-        unmatched_clusters: [newCluster, ...prev.unmatched_clusters]
-      };
-    });
-    setIsStateDirty(true);
-    toast.info("Transaction moved to 'Unmatched' for review.");
+    // ...existing code...
   };
 
-  const handleDetachTransaction = (transactionToDetach, sourceClusterId) => {
-    setClassificationResult(prev => ({
-      ...prev,
-      unmatched_clusters: prev.unmatched_clusters
-        .map(c => {
-          if (c.cluster_id === sourceClusterId) {
-            return {...c, transactions: c.transactions.filter(t => t._tempId !== transactionToDetach._tempId)};
-          }
-          return c;
-        })
-        .filter(c => c.transactions.length > 0)
-    }));
-    setDetachedTransactions(prev => [...prev, transactionToDetach]);
-    toast.info("Transaction detached.");
-  };
-  // --- END: SIMPLIFIED HANDLER FUNCTIONS ---
   // --- ADD THIS ENTIRE FUNCTION ---
   const handleGenerateVouchers = async () => {
     setClassifying(true);
