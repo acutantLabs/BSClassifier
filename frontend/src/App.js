@@ -3,6 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } 
 import axios from 'axios';
 import { useDropzone } from 'react-dropzone';
 import './App.css';
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './components/ui/command';
+import { Popover, PopoverContent, PopoverTrigger } from './components/ui/popover';
 
 import { Button } from './components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -34,7 +36,7 @@ import {
   Search,
   Filter,
   RefreshCw,
-  ChevronRight,
+  ChevronRight,ChevronsUpDown, 
   AlertCircle,
   CheckCircle2,
   HelpCircle,
@@ -1407,9 +1409,95 @@ const REGEX_BUILDING_BLOCKS = [
   { label: "Anything", snippet: ".*", description: "any character, zero or more times" },
 ];
 // --- END OF ADDITION ---
+// --- FIND AND REPLACE THE ENTIRE LedgerCombobox COMPONENT ---
+const LedgerCombobox = ({ ledgers, value, onValueChange }) => {
+  const [open, setOpen] = React.useState(false);
 
+  const triggerRef = useRef(null);
+  const [popoverWidth, setPopoverWidth] = useState(0);
+
+  useEffect(() => {
+    if (triggerRef.current) {
+      setPopoverWidth(triggerRef.current.offsetWidth);
+    }
+  }, []);
+
+  // Check if the current typed value is an exact match to an existing ledger
+  const isExactMatch = ledgers.some(ledger => ledger.toLowerCase() === value.toLowerCase());
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          ref={triggerRef}
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className="w-full justify-between font-normal"
+        >
+          <span className="truncate">{value || "Select or type a ledger..."}</span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        className="p-0"
+        style={{ width: popoverWidth }}
+      >
+        <Command
+          // The filter remains to provide the search functionality
+          filter={(itemValue, search) => itemValue.toLowerCase().includes(search.toLowerCase()) ? 1 : 0}
+        >
+          <CommandInput
+            placeholder="Search or create ledger..."
+            value={value}
+            onValueChange={onValueChange}
+          />
+          <CommandList>
+            {/* CommandEmpty is now simple and only shows when there are TRULY no options */}
+            <CommandEmpty>No results found.</CommandEmpty>
+
+            <CommandGroup>
+              {/* --- THIS IS THE KEY FIX --- */}
+              {/* Conditionally render the "Create" option as a regular item */}
+              {/* It appears only if the user has typed something AND it's not an exact match */}
+              {value && !isExactMatch && (
+                <CommandItem
+                  key={value}
+                  value={value}
+                  onSelect={(currentValue) => {
+                    onValueChange(currentValue);
+                    setOpen(false);
+                  }}
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create "{value}"
+                </CommandItem>
+              )}
+
+              {/* Then, render all the matching ledgers from the list */}
+              {ledgers.map((ledger) => (
+                <CommandItem
+                  key={ledger}
+                  value={ledger}
+                  onSelect={(currentValue) => {
+                    onValueChange(currentValue);
+                    setOpen(false);
+                  }}
+                >
+                  <Check className={`mr-2 h-4 w-4 ${value.toLowerCase() === ledger.toLowerCase() ? "opacity-100" : "opacity-0"}`} />
+                  {ledger}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+};
+// --- END OF REPLACEMENT ---
 // --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense }) => {
+const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense, knownLedgers }) => {
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1691,7 +1779,12 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       </ScrollArea>
       
       <div className="flex items-center gap-4 pt-2">
-        <Input placeholder="Enter Ledger Name..." value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} />
+      {/* --- THIS IS THE REPLACEMENT --- */}
+      <LedgerCombobox 
+        ledgers={knownLedgers || []}
+        value={ledgerName}
+        onValueChange={setLedgerName}
+      />
         <Button onClick={handleCreateRule} disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
           <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
@@ -1809,11 +1902,24 @@ const StatementDetailsPage = () => {
   const [voucherData, setVoucherData] = useState(null);
   const [isStateDirty, setIsStateDirty] = useState(false);
   const [detachedTransactions, setDetachedTransactions] = useState([]);
+  const [knownLedgers, setKnownLedgers] = useState([]);
+
 
   // --- START: NEW UNIFIED DATA PROCESSING ---
   const runClassification = useCallback(async (isForced = false) => {
+    // 1. Add a "guard clause" to prevent running if the statement isn't loaded yet.
+    if (!statement) {
+      return; 
+    }
     setClassifying(true);
     try {
+      try {
+        const ledgersRes = await axios.get(`${API}/clients/${statement.client_id}/known-ledgers`);
+        setKnownLedgers(ledgersRes.data);
+      } catch (err) {
+        toast.error("Could not fetch known ledgers list.");
+        setKnownLedgers([]); // Set to empty array on failure
+      }
       const url = isForced 
         ? `${API}/classify-transactions/${statementId}?force_reclassify=true`
         : `${API}/classify-transactions/${statementId}`;
@@ -1845,7 +1951,7 @@ const StatementDetailsPage = () => {
     } finally {
       setClassifying(false);
     }
-  }, [statementId]);
+  }, [statementId, statement]);
 
   const saveClassificationState = async (resultToSave) => {
     if (!resultToSave) return;
@@ -2133,6 +2239,8 @@ const StatementDetailsPage = () => {
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
                 onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
+                knownLedgers={knownLedgers} // <-- ADD THIS LINE
+
               />
             ))
             // --- END OF NEW REPLACEMENT ---
@@ -2169,6 +2277,8 @@ const StatementDetailsPage = () => {
                 otherNarrations={otherNarrations}
                 onDetach={() => {}} // Detaching from this group does nothing
                 onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS
+                knownLedgers={knownLedgers} // <-- ADD THIS LINE
+
             />
           </CardContent>
         </Card>
