@@ -2466,9 +2466,23 @@ const Navigation = () => {
     <nav className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-6">
         <div className="flex items-center justify-between h-16">
-           <Link to="/" className="flex items-center space-x-3">
-            <img src={logo} alt="Acutant Labs Logo" className="h-20 w-20" />
-            <span className="text-xl font-bold text-slate-900">ABS Processor</span>
+            <Link to="/" className="flex items-center space-x-3">
+            {/* The container now has NO padding */}
+            <div 
+              className="h-16 w-16 rounded-xl"
+              style={{
+                backgroundImage: `
+                  linear-gradient(to right, #e2e8f0 1px, transparent 1px),
+                  linear-gradient(to bottom, #e2e8f0 1px, transparent 1px)
+                `,
+                // This creates wider, rectangular cells
+                backgroundSize: '15px 10px', 
+              }}
+            >
+              {/* Padding is applied to the image itself to prevent shrinking */}
+              <img src={logo} alt="Acutant Labs Logo" className="h-full w-full p-0.1" />
+            </div>
+            <span className="text-3xl font-bold text-slate-900">ABS Processor</span>
           </Link>
           
           <div className="flex items-center space-x-6">
