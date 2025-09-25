@@ -1,3 +1,5 @@
+import logo from './assets/logo.png'; // Assuming your logo is in src/assets/
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
@@ -2464,10 +2466,8 @@ const Navigation = () => {
     <nav className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-6">
         <div className="flex items-center justify-between h-16">
-          <Link to="/" className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-lg flex items-center justify-center">
-              <FileSpreadsheet className="w-6 h-6 text-white" />
-            </div>
+           <Link to="/" className="flex items-center space-x-3">
+            <img src={logo} alt="Acutant Labs Logo" className="h-20 w-20" />
             <span className="text-xl font-bold text-slate-900">ABS Processor</span>
           </Link>
           
