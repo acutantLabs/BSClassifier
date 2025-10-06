@@ -755,22 +755,31 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
             df = pd.read_csv(io.BytesIO(content))
         else:
             df = pd.read_excel(io.BytesIO(content))
+
+        
         # --- END OF REPLACEMENT ---
         df = df.loc[:, ~df.columns.str.startswith('Unnamed:')]
         # Convert all data types in the DataFrame to strings to ensure JSON compatibility.
 
-        df = df.astype(str)
-
         df = df.dropna(how='all').reset_index(drop=True)
+
+        # 1. Replace pandas' NaN/NaT with None, which is JSON-serializable as 'null'.
+        # This is more robust than fillna('') as it preserves the "empty" nature.
+        df = df.replace({np.nan: None, pd.NaT: None})
+
+        # 2. Convert the entire clean DataFrame into a list of standard Python objects.
+        # This is the key step that correctly converts numpy.int64 -> int, etc.
+        sanitized_records = df.to_dict('records')
+
         headers = df.columns.tolist()
-        preview_data = df.head(10).fillna('').to_dict('records')
+        preview_data = sanitized_records[:10] # Use the sanitized records for the preview
         suggested_mapping = suggest_column_mapping(headers)
         
-        # Store file data temporarily in the new table
+        # Store the sanitized data temporarily in the new table
         temp_file = models.TempFile(
             filename=file.filename,
             headers=headers,
-            raw_data=df.fillna('').to_dict('records')
+            raw_data=sanitized_records
         )
         
         db.add(temp_file)
@@ -789,6 +798,20 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
         logging.error(f"File upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 # --- END OF REPLACEMENT ---
+def _clean_amount_string(value: Any) -> str:
+    """
+    Cleans a string to make it safely convertible to a number by removing
+    commas and other non-numeric characters (except the decimal point).
+    """
+    if value is None:
+        return "0"
+    s = str(value)
+    # Remove commas, then keep only digits, the first decimal point, and a leading minus sign.
+    s = s.replace(",", "")
+    # A simple regex to strip anything that's not a digit or a decimal point.
+    # This is a safe way to handle currency symbols, etc.
+    s = re.sub(r"[^0-9.-]", "", s)
+    return s if s else "0"
 # --- ADD THIS HELPER FUNCTION ---
 def normalize_transaction_data(
     raw_data: List[Dict], mapping: "ColumnMapping"
@@ -812,17 +835,19 @@ def normalize_transaction_data(
         new_row = row.copy()
         try:
             # Safely convert to numeric, coercing errors to NaN, then to 0.0
-            credit_val = pd.to_numeric(row.get(credit_col), errors='coerce')
-            debit_val = pd.to_numeric(row.get(debit_col), errors='coerce')
+            credit_val = pd.to_numeric(_clean_amount_string(row.get(credit_col)), errors='coerce')
+            debit_val = pd.to_numeric(_clean_amount_string(row.get(debit_col)), errors='coerce')
             credit_val = credit_val if pd.notna(credit_val) else 0.0
             debit_val = debit_val if pd.notna(debit_val) else 0.0
             
             # Logic to determine Amount and CR/DR
             if credit_val > 0:
-                new_row["Amount (INR)"] = credit_val
+                # Convert from numpy.float64 to a standard Python float
+                new_row["Amount (INR)"] = float(credit_val)
                 new_row["CR/DR"] = "CR"
             elif debit_val > 0:
-                new_row["Amount (INR)"] = debit_val
+                # Convert from numpy.float64 to a standard Python float
+                new_row["Amount (INR)"] = float(debit_val)
                 new_row["CR/DR"] = "DR"
             else:
                 # Handle rows with 0 in both, or non-standard entries
