@@ -1824,7 +1824,7 @@ const ClassifiedTransactionsTable = ({
         {/* THE REAL THEAD IS NOW INVISIBLE. It only serves to set column widths. */}
         <thead className="invisible">
           <tr className="border-b">
-            <th className="p-2 w-40"></th>
+            <th className="p-2 w-24"></th>
             <th className="p-2 w-12"></th>
             <th className="p-2"></th>
             <th className="p-2 w-32"></th>
@@ -1952,16 +1952,18 @@ const BulkActionRibbon = ({
 
         <div className="flex items-center gap-2">
           <span>Re-assign to:</span>
-          <div className="w-52">
+          {/* Increased width from w-52 to w-96 */}
+          <div className="w-96"> 
             <LedgerCombobox ledgers={knownLedgers} value={targetLedger} onValueChange={setTargetLedger} />
           </div>
-          <Button size="sm" onClick={handleReassign} disabled={!targetLedger}>Re-assign</Button>
+          {/* Added w-40 for uniform width */}
+          <Button size="sm" onClick={handleReassign} disabled={!targetLedger} className="w-40 justify-center">Re-assign</Button>
         </div>
 
         <Separator orientation="vertical" className="h-8" />
 
-        <Button size="sm" variant="outline" onClick={onMarkSuspense}>Mark as Suspense</Button>
-        <Button size="sm" variant="outline" onClick={onReclassify}>Re-classify Selected</Button>
+        <Button size="sm" variant="outline" onClick={onMarkSuspense} className="w-40 justify-center">Mark as Suspense</Button>
+        <Button size="sm" variant="outline" onClick={onReclassify} className="w-40 justify-center">Re-classify Selected</Button>
       </div>
     </div>
   );
@@ -1971,7 +1973,7 @@ const StickyTableHeader = ({ isAllSelected, onToggleAll }) => {
   return (
     // This div mimics the table row. It's NOT a real <thead>.
     <div className="flex w-full bg-slate-50 border-b border-slate-300 font-semibold text-sm">
-      <div className="p-2 w-40">Date</div>
+      <div className="p-2 w-24">Date</div>
       <div className="p-2 w-12 text-center">
         <input
           type="checkbox"
@@ -2068,6 +2070,49 @@ const StatementDetailsPage = () => {
     // 3. Clean up the selection and notify the user
     setSelectedTxIds(new Set());
     toast.success(`${selectedTxIds.size} transaction(s) have been updated.`);
+  };
+
+  const handleBulkReclassify = async () => {
+    if (selectedTxIds.size === 0) {
+      toast.info("No transactions selected.");
+      return;
+    }
+
+    // 1. Gather the full transaction objects that are selected
+    const transactionsToReclassify = classifiedTxns.filter(tx => selectedTxIds.has(tx._tempId));
+    
+    try {
+      // 2. Call the new backend endpoint
+      const response = await axios.post(
+        `${API}/statements/${statementId}/reclassify-subset`,
+        { transactions: transactionsToReclassify }
+      );
+      
+      const reclassifiedResults = response.data;
+
+      // 3. Merge the results back into the main list
+      const resultMap = new Map(reclassifiedResults.map(tx => [tx._tempId, tx]));
+      const updatedTransactions = classifiedTxns.map(originalTx => 
+        resultMap.has(originalTx._tempId) ? resultMap.get(originalTx._tempId) : originalTx
+      );
+
+      const newResult = {
+        ...classificationResult,
+        classified_transactions: updatedTransactions,
+      };
+
+      // 4. Optimistically update the UI and persist the new state
+      setClassificationResult(newResult);
+      await saveClassificationState(newResult);
+      
+      // 5. Clean up and notify
+      setSelectedTxIds(new Set());
+      toast.success(`${reclassifiedResults.length} transaction(s) were re-classified and saved.`);
+
+    } catch (error) {
+      toast.error("Failed to re-classify transactions.");
+      console.error("Bulk re-classify error:", error);
+    }
   };
   // --- START: NEW UNIFIED DATA PROCESSING ---
   const runClassification = useCallback(async (isForced = false) => {
@@ -2471,7 +2516,7 @@ const StatementDetailsPage = () => {
               // --- START OF ADDITION (2 of 2): CONNECTED HANDLERS ---
               onReassign={(ledger) => handleBulkUpdate('reassign', { targetLedger: ledger })}
               onMarkSuspense={() => handleBulkUpdate('markSuspense')}
-              onReclassify={() => console.log('Re-classify:', Array.from(selectedTxIds))} // <-- This one remains for now
+              onReclassify={handleBulkReclassify}
               // --- END OF ADDITION (2 of 2) ---
             />
           </div>

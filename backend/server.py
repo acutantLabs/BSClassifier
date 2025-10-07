@@ -287,6 +287,10 @@ class PaginatedSamplesResponse(BaseModel):
     total_samples: int
     samples: List[SampleModel]
 
+class ReclassifySubsetRequest(BaseModel):
+    """Defines the request body for re-classifying a subset of transactions."""
+    transactions: List[Dict[str, Any]]
+
 # Utility Functions
 def detect_date_columns(headers: List[str]) -> List[str]:
     """Detect potential date columns"""
@@ -813,6 +817,7 @@ def _clean_amount_string(value: Any) -> str:
     s = re.sub(r"[^0-9.-]", "", s)
     return s if s else "0"
 # --- ADD THIS HELPER FUNCTION ---
+
 def normalize_transaction_data(
     raw_data: List[Dict], mapping: "ColumnMapping"
 ) -> List[Dict]:
@@ -870,7 +875,51 @@ def normalize_transaction_data(
             
     return normalized_data
 
+@api_router.post("/statements/{statement_id}/reclassify-subset", response_model=List[Dict[str, Any]])
+async def reclassify_subset(
+    statement_id: str,
+    request: ReclassifySubsetRequest,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Re-applies all regex rules to a specific subset of transactions and returns the result
+    without saving it to the database.
+    """
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
 
+    # Fetch all rules for the client
+    query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
+    result = await db.execute(query)
+    patterns = result.scalars().all()
+
+    # Create a list to hold the results
+    reclassified_transactions = []
+
+    # Iterate ONLY through the transactions provided in the request
+    for transaction in request.transactions:
+        # The frontend uses 'Narration' as the standardized key
+        narration = str(transaction.get("Narration", ""))
+        matched = False
+        
+        # Apply the same matching logic as the main classification function
+        for pattern in patterns:
+            if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
+                # Update the ledger and ensure user_confirmed is false
+                transaction["matched_ledger"] = pattern.ledger_name
+                transaction["user_confirmed"] = False 
+                reclassified_transactions.append(transaction)
+                matched = True
+                break
+        
+        if not matched:
+            # If no rule matches, it becomes a soft suspense item
+            transaction["matched_ledger"] = "Suspense"
+            transaction["user_confirmed"] = False
+            reclassified_transactions.append(transaction)
+
+    return reclassified_transactions
 
 # --- REPLACEMENT for confirm_column_mapping ---
 @api_router.post("/confirm-mapping/{file_id}")
