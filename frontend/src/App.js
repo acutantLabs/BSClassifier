@@ -1832,15 +1832,15 @@ const ClassifiedTransactionsTable = ({
     <div className="overflow-x-auto">
       <table className="w-full text-sm table-fixed">
         {/* THE REAL THEAD IS NOW INVISIBLE. It only serves to set column widths. */}
-        <thead className="invisible">
+        <thead>
           <tr className="border-b">
-            <th className="p-2 w-24"></th>
-            <th className="p-2 w-12"></th>
-            <th className="p-2"></th>
-            <th className="p-2 w-32"></th>
-            <th className="p-2 w-24"></th>
-            <th className="p-2 w-48"></th>
-            <th className="p-2 w-24"></th>
+            <th className="py-0 px-2 w-24"></th>
+            <th className="py-0 px-2 w-12"></th>
+            <th className="py-0 px-2"></th>
+            <th className="py-0 px-2 w-32"></th>
+            <th className="py-0 px-2 w-24"></th>
+            <th className="py-0 px-2 w-48"></th>
+            <th className="py-0 px-2 w-24"></th>
           </tr>
         </thead>
         <tbody>
@@ -2508,38 +2508,38 @@ const StatementDetailsPage = () => {
         </Card>
       )}
       {/* Classified Transactions Table Section */}
-      <Card className="border-0 shadow-sm">
-        <CardHeader>
-          <CardTitle>Classified Transactions</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {/* --- START OF ADDITION (3 of 3): THE STICKY CONTAINER --- */}
-          <div className="sticky top-16 z-20">
-            <StickyTableHeader 
-              isAllSelected={isAllSelected}
-              onToggleAll={handleToggleAll}
-            />
-            <BulkActionRibbon
-              selectedCount={selectedTxIds.size}
-              knownLedgers={knownLedgers}
-              onClearSelection={() => setSelectedTxIds(new Set())}
-              // --- START OF ADDITION (2 of 2): CONNECTED HANDLERS ---
-              onReassign={(ledger) => handleBulkUpdate('reassign', { targetLedger: ledger })}
-              onMarkSuspense={() => handleBulkUpdate('markSuspense')}
-              onReclassify={handleBulkReclassify}
-              // --- END OF ADDITION (2 of 2) ---
-            />
-          </div>
-          {/* --- END OF ADDITION (3 of 3) --- */}
+      <div className="bg-white border-0 shadow-sm rounded-lg">
+        {/* This div acts as the CardHeader, with controlled bottom padding (pb-4) to close the gap */}
+        <div className="p-6 pb-4">
+          <h3 className="text-2xl font-semibold leading-none tracking-tight">
+            Classified Transactions
+          </h3>
+        </div>
 
-          <ClassifiedTransactionsTable
-            transactions={classifiedTxns} // Pass the original full list
-            onFlagAsIncorrect={handleFlagAsIncorrect}
-            selectedTxIds={selectedTxIds}
-            onToggleRow={handleToggleRow}
+        {/* The sticky container for the header and ribbon */}
+        <div className="sticky top-16 z-20">
+          <StickyTableHeader 
+            isAllSelected={isAllSelected}
+            onToggleAll={handleToggleAll}
           />
-        </CardContent>
-      </Card>
+          <BulkActionRibbon
+            selectedCount={selectedTxIds.size}
+            knownLedgers={knownLedgers}
+            onClearSelection={() => setSelectedTxIds(new Set())}
+            onReassign={(ledger) => handleBulkUpdate('reassign', { targetLedger: ledger })}
+            onMarkSuspense={() => handleBulkUpdate('markSuspense')}
+            onReclassify={handleBulkReclassify}
+          />
+        </div>
+        
+        {/* The table now sits inside the same container, with no extra wrappers */}
+        <ClassifiedTransactionsTable
+          transactions={classifiedTxns}
+          onFlagAsIncorrect={handleFlagAsIncorrect}
+          selectedTxIds={selectedTxIds}
+          onToggleRow={handleToggleRow}
+        />
+      </div>
       {/* Voucher Modal */}{/* --- ADD THIS COMPONENT AT THE END --- */}
       <DownloadVoucherModal 
         isOpen={isVoucherModalOpen}
