@@ -1801,10 +1801,18 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
 // --- ADD THIS ENTIRE NEW COMPONENT ---
 
 // --- FIND AND REPLACE THE ENTIRE ClassifiedTransactionsTable COMPONENT ---
-const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
+const ClassifiedTransactionsTable = ({
+  transactions,
+  onFlagAsIncorrect,
+  selectedTxIds,
+  onToggleRow,
+  // NOTE: onToggleAll is no longer passed here
+}) => {
   const transactionsToShow = transactions.filter(
-    t => t.matched_ledger !== "Suspense" || t.user_confirmed == true
+    t => t.matched_ledger !== "Suspense" || t.user_confirmed === true
   );
+
+  // NOTE: isAllSelected logic is moved to the parent component
 
   if (transactionsToShow.length === 0) {
     return <p className="text-center text-slate-500 py-4">No transactions were matched to existing rules.</p>;
@@ -1812,34 +1820,42 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm table-fixed"> {/* Use table-fixed for precise column widths */}
-        <thead>
+      <table className="w-full text-sm table-fixed">
+        {/* THE REAL THEAD IS NOW INVISIBLE. It only serves to set column widths. */}
+        <thead className="invisible">
           <tr className="border-b">
-            <th className="p-2 text-left font-semibold w-40">Date</th> {/* Added fixed width */}
-            <th className="p-2 text-left font-semibold">Description</th> {/* Takes remaining space */}
-            <th className="p-2 text-right font-semibold w-32">Amount</th> {/* Added fixed width */}
-            <th className="p-2 text-left font-semibold w-24">CR/DR</th> {/* Added fixed width */}
-            <th className="p-2 text-left font-semibold w-48">Matched Ledger</th> {/* Shrunk width */}
-            <th className="p-2 text-center font-semibold w-24">Actions</th> {/* Added fixed width */}
+            <th className="p-2 w-40"></th>
+            <th className="p-2 w-12"></th>
+            <th className="p-2"></th>
+            <th className="p-2 w-32"></th>
+            <th className="p-2 w-24"></th>
+            <th className="p-2 w-48"></th>
+            <th className="p-2 w-24"></th>
           </tr>
         </thead>
         <tbody>
           {transactionsToShow.map(transaction => (
-            <tr key={transaction.Narration + transaction.Amount + Math.random()} className="border-b hover:bg-slate-50">
+            <tr
+              key={transaction._tempId || (transaction.Narration + transaction.Amount + Math.random())}
+              className={`border-b hover:bg-slate-50 ${selectedTxIds.has(transaction._tempId) ? 'bg-blue-50' : ''}`}
+            >
               <td className="p-2 whitespace-nowrap">{transaction.Date}</td>
-              
-              {/* --- THIS IS THE NEW DESCRIPTION CELL --- */}
+              <td className="p-2 text-center">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={selectedTxIds.has(transaction._tempId)}
+                  onChange={() => onToggleRow(transaction._tempId)}
+                />
+              </td>
               <td className="p-2 max-w-sm hyphenate">{transaction.Narration}</td>
-
-              {/* --- END OF NEW DESCRIPTION CELL --- */}
-
               <td className="p-2 text-right font-mono">{transaction.Amount?.toLocaleString()}</td>
               <td className="p-2">{transaction['CR/DR']}</td>
               <td className="p-2 truncate">{transaction.matched_ledger}</td>
               <td className="p-2 text-center">
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => onFlagAsIncorrect(transaction)}
                   title="Flag as incorrect match"
                 >
@@ -1853,6 +1869,7 @@ const ClassifiedTransactionsTable = ({ transactions, onFlagAsIncorrect }) => {
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 // --- END OF REPLACEMENT ---
 
 // --- FIND AND REPLACE THE ENTIRE generateSimpleRegex FUNCTION ---
@@ -1894,6 +1911,83 @@ const generateSimpleRegex = (narration) => {
   // If no good keyword is found after all filtering, return a generic pattern
   return '.*';
 };
+
+const BulkActionRibbon = ({
+  selectedCount,
+  knownLedgers,
+  onClearSelection,
+  onReassign,
+  onMarkSuspense,
+  onReclassify
+}) => {
+  const [targetLedger, setTargetLedger] = useState('');
+
+  const handleReassign = () => {
+    if (!targetLedger) {
+      toast.error("Please select a ledger to re-assign.");
+      return;
+    }
+    onReassign(targetLedger);
+  };
+
+  const isVisible = selectedCount > 0;
+
+  return (
+    <div
+      className={`
+        sticky top-[113px] z-20 bg-slate-100 border-b border-slate-300
+        transition-all duration-300 ease-in-out overflow-hidden
+        ${isVisible ? 'max-h-20 opacity-100' : 'max-h-0 opacity-0 border-none'}
+      `}
+    >
+      <div className="p-2 flex items-center gap-4 text-sm">
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClearSelection}>
+            <X className="w-4 h-4" />
+          </Button>
+          <span className="font-bold">{selectedCount}</span> item(s) selected
+        </div>
+
+        <Separator orientation="vertical" className="h-8" />
+
+        <div className="flex items-center gap-2">
+          <span>Re-assign to:</span>
+          <div className="w-52">
+            <LedgerCombobox ledgers={knownLedgers} value={targetLedger} onValueChange={setTargetLedger} />
+          </div>
+          <Button size="sm" onClick={handleReassign} disabled={!targetLedger}>Re-assign</Button>
+        </div>
+
+        <Separator orientation="vertical" className="h-8" />
+
+        <Button size="sm" variant="outline" onClick={onMarkSuspense}>Mark as Suspense</Button>
+        <Button size="sm" variant="outline" onClick={onReclassify}>Re-classify Selected</Button>
+      </div>
+    </div>
+  );
+};
+
+const StickyTableHeader = ({ isAllSelected, onToggleAll }) => {
+  return (
+    // This div mimics the table row. It's NOT a real <thead>.
+    <div className="flex w-full bg-slate-50 border-b border-slate-300 font-semibold text-sm">
+      <div className="p-2 w-40">Date</div>
+      <div className="p-2 w-12 text-center">
+        <input
+          type="checkbox"
+          className="h-4 w-4"
+          checked={isAllSelected}
+          onChange={onToggleAll}
+        />
+      </div>
+      <div className="p-2 flex-grow">Description</div>
+      <div className="p-2 w-32 text-right">Amount</div>
+      <div className="p-2 w-24">CR/DR</div>
+      <div className="p-2 w-48">Matched Ledger</div>
+      <div className="p-2 w-24 text-center">Actions</div>
+    </div>
+  );
+};
 // Statement Classification Page Component
 const StatementDetailsPage = () => {
   const { statementId } = useParams();
@@ -1907,7 +2001,74 @@ const StatementDetailsPage = () => {
   const [detachedTransactions, setDetachedTransactions] = useState([]);
   const [knownLedgers, setKnownLedgers] = useState([]);
 
+  const [selectedTxIds, setSelectedTxIds] = useState(new Set());
 
+  const classifiedTxns = useMemo(() => {
+    return classificationResult?.classified_transactions || [];
+  }, [classificationResult]);
+
+  const handleToggleRow = (txId) => {
+    setSelectedTxIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(txId)) {
+        newSet.delete(txId);
+      } else {
+        newSet.add(txId);
+      }
+      return newSet;
+    });
+  };
+  
+  const handleToggleAll = () => {
+    setSelectedTxIds(prev => {
+      // If not everything is selected, select all. Otherwise, clear selection.
+      if (prev.size < classifiedTxns.length) {
+        return new Set(classifiedTxns.map(t => t._tempId));
+      } else {
+        return new Set();
+      }
+    });
+  };
+   const handleBulkUpdate = async (type, payload = {}) => {
+    if (selectedTxIds.size === 0) {
+      toast.info("No transactions selected.");
+      return;
+    }
+    
+    // Create a new version of the transactions list with the updates applied
+    const updatedTransactions = classifiedTxns.map(tx => {
+      // If this transaction is not selected, return it as is
+      if (!selectedTxIds.has(tx._tempId)) {
+        return tx;
+      }
+      
+      // If it is selected, apply the change
+      if (type === 'reassign') {
+        return { ...tx, matched_ledger: payload.targetLedger, user_confirmed: true };
+      }
+      
+      if (type === 'markSuspense') {
+        return { ...tx, matched_ledger: 'Suspense', user_confirmed: true };
+      }
+      
+      return tx; // Fallback
+    });
+    
+    const newResult = {
+      ...classificationResult,
+      classified_transactions: updatedTransactions,
+    };
+    
+    // 1. Optimistically update the UI so it feels instant
+    setClassificationResult(newResult);
+    
+    // 2. Persist the changes to the database
+    await saveClassificationState(newResult);
+    
+    // 3. Clean up the selection and notify the user
+    setSelectedTxIds(new Set());
+    toast.success(`${selectedTxIds.size} transaction(s) have been updated.`);
+  };
   // --- START: NEW UNIFIED DATA PROCESSING ---
   const runClassification = useCallback(async (isForced = false) => {
     // 1. Add a "guard clause" to prevent running if the statement isn't loaded yet.
@@ -2199,6 +2360,11 @@ const StatementDetailsPage = () => {
   if (loading || !classificationResult) {
     return <div>Loading classification results...</div>;
   }
+   const classifiedTxnsToShow = (classificationResult?.classified_transactions || []).filter(
+    t => t.matched_ledger !== "Suspense" || t.user_confirmed === true
+  );
+  const isAllSelected = classifiedTxnsToShow.length > 0 && selectedTxIds.size === classifiedTxnsToShow.length;
+  // --- END OF FIX ---
   
   return (
     <div className="space-y-8">
@@ -2286,17 +2452,37 @@ const StatementDetailsPage = () => {
           </CardContent>
         </Card>
       )}
-      {/* --- END: ADD THIS ENTIRE JSX BLOCK --- */}
       {/* Classified Transactions Table Section */}
       <Card className="border-0 shadow-sm">
         <CardHeader>
           <CardTitle>Classified Transactions</CardTitle>
         </CardHeader>
-        <CardContent>
-        <ClassifiedTransactionsTable
-          transactions={classificationResult.classified_transactions}
-          onFlagAsIncorrect={handleFlagAsIncorrect}
-        />
+        <CardContent className="p-0">
+          {/* --- START OF ADDITION (3 of 3): THE STICKY CONTAINER --- */}
+          <div className="sticky top-16 z-20">
+            <StickyTableHeader 
+              isAllSelected={isAllSelected}
+              onToggleAll={handleToggleAll}
+            />
+            <BulkActionRibbon
+              selectedCount={selectedTxIds.size}
+              knownLedgers={knownLedgers}
+              onClearSelection={() => setSelectedTxIds(new Set())}
+              // --- START OF ADDITION (2 of 2): CONNECTED HANDLERS ---
+              onReassign={(ledger) => handleBulkUpdate('reassign', { targetLedger: ledger })}
+              onMarkSuspense={() => handleBulkUpdate('markSuspense')}
+              onReclassify={() => console.log('Re-classify:', Array.from(selectedTxIds))} // <-- This one remains for now
+              // --- END OF ADDITION (2 of 2) ---
+            />
+          </div>
+          {/* --- END OF ADDITION (3 of 3) --- */}
+
+          <ClassifiedTransactionsTable
+            transactions={classifiedTxns} // Pass the original full list
+            onFlagAsIncorrect={handleFlagAsIncorrect}
+            selectedTxIds={selectedTxIds}
+            onToggleRow={handleToggleRow}
+          />
         </CardContent>
       </Card>
       {/* Voucher Modal */}{/* --- ADD THIS COMPONENT AT THE END --- */}
