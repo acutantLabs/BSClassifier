@@ -2126,7 +2126,7 @@ const StatementDetailsPage = () => {
       await saveClassificationState(saveResult);
 
       // Re-run classification on server to rebuild clusters correctly
-      await runClassification(true);
+      await runClassification();
 
       toast.success('Marked as incorrect and returned to unclassified clusters.');
     } catch (err) {
