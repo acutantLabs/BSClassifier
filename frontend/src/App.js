@@ -1753,7 +1753,8 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
           {cluster.transactions.map((transaction, i) => {
             const isCredit = (transaction['CR/DR'] || '').startsWith('CR');
             return (
-              <div key={i} className="flex items-center justify-between gap-2 p-1 group text-[13px] leading-snug">
+              <div key={i} className="flex items-center gap-2 p-1 group text-[13px] leading-snug">
+                {/* Action Buttons (unchanged) */}
                 <div className="flex-shrink-0 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
                    <Button variant="ghost" size="icon" className="w-6 h-6" onClick={() => onMarkAsSuspense([transaction])} title="Mark as Suspense">
                       <HelpCircle className="w-3 h-3 text-slate-500" />
@@ -1763,9 +1764,19 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
                    </Button>
                 </div>
 
+                {/* NEW: Fixed-width container for the date badge */}
+                <div className="w-24 flex-shrink-0">
+                  <Badge variant="outline" className="font-mono">
+                    {(transaction.Date || '').split(' ')[0]}
+                  </Badge>
+                </div>
+
+                {/* Narration (now correctly aligned) */}
                 <div className="truncate flex-grow" dangerouslySetInnerHTML={{ __html: validation.highlightedNarrations[i] }} />
-                <Badge variant="outline" className="font-mono">{formatCurrency(transaction.Amount)}</Badge>
+
+                {/* NEW: Container for right-side badges */}
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  <Badge variant="outline" className="font-mono">{formatCurrency(transaction.Amount)}</Badge>
                   <Badge 
                     className={`h-5 font-semibold border-0 bg-slate-800 ${isCredit 
                       ? 'text-green-400' 
@@ -1773,7 +1784,6 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
                   >
                     {isCredit ? 'Credit' : 'Debit'}
                   </Badge>
-                  
                 </div>
               </div>
             );
