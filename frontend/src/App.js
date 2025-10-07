@@ -1747,7 +1747,8 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
 
       <p className="text-sm font-semibold">Sample Transactions ({cluster.transactions.length} items):</p>
       
-      <ScrollArea className="p-2 border rounded-md bg-white max-h-96">
+      {/* THE FIX: Replaced ScrollArea with a div and added overflow-y-auto */}
+      <div className="p-2 border rounded-md bg-white max-h-96 overflow-y-auto">
         <div className="text-xs ">
           {cluster.transactions.map((transaction, i) => {
             const isCredit = (transaction['CR/DR'] || '').startsWith('CR');
@@ -1778,8 +1779,8 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
             );
           })}
         </div>
-      </ScrollArea>
-      
+      </div>
+         
       <div className="flex items-center gap-4 pt-2">
       {/* --- THIS IS THE REPLACEMENT --- */}
       <LedgerCombobox 
