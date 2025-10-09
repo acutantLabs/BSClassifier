@@ -978,38 +978,67 @@ const ClientDetailsPage = () => {
   const [statements, setStatements] = useState([]);
   const [statementToDelete, setStatementToDelete] = useState(null);
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
-  const [loading, setLoading] = useState(true);
 
   // New state for Tally ledger history
   const [knownLedgers, setKnownLedgers] = useState([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [ledgersData, setLedgersData] = useState({ ledgers: [], total_pages: 1 });
+  const [ledgersLoading, setLedgersLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const fetchData = useCallback(async () => {
+  const fetchClientData = useCallback(async () => {
+    // This part only fetches non-paginated data once
     setLoading(true);
     try {
       const clientRes = await axios.get(`${API}/clients/${clientId}`);
       setClient(clientRes.data);
-
       const accountsRes = await axios.get(`${API}/clients/${clientId}/bank-accounts`);
       setBankAccounts(accountsRes.data);
-      
       const statementsRes = await axios.get(`${API}/clients/${clientId}/statements`);
       setStatements(statementsRes.data);
-      
-      // Fetch known ledgers summary
-      const ledgersRes = await axios.get(`${API}/clients/${clientId}/known-ledgers/summary`);
-      setKnownLedgers(ledgersRes.data);
-
     } catch (error) {
-      toast.error("Failed to fetch client details.");
+      toast.error("Failed to fetch main client details.");
     } finally {
       setLoading(false);
     }
   }, [clientId]);
 
+  const fetchLedgers = useCallback(async (page, search) => {
+    // This function fetches the paginated ledgers
+    setLedgersLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: page,
+        limit: 12, // Display 12 items per page
+        search: search || '',
+      });
+      const response = await axios.get(`${API}/clients/${clientId}/ledgers?${params.toString()}`);
+      setLedgersData(response.data);
+    } catch (error) {
+      toast.error("Failed to fetch Tally ledgers.");
+    } finally {
+      setLedgersLoading(false);
+    }
+  }, [clientId]);
+
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    fetchClientData();
+  }, [fetchClientData]);
+
+  // --- START OF ADDITION (2 of 3): New useEffect for fetching ledgers ---
+  useEffect(() => {
+    // Debounce the search query to avoid API calls on every keystroke
+    const handler = setTimeout(() => {
+      fetchLedgers(currentPage, searchQuery);
+    }, 300); // 300ms delay
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [currentPage, searchQuery, fetchLedgers]);
+  // --- END OF ADDITION (2 of 3) ---
 
   const handleAccountCreated = (newAccount) => {
     setBankAccounts(prev => [...prev, newAccount]);
@@ -1115,35 +1144,73 @@ const ClientDetailsPage = () => {
         </CardContent>
       </Card>
 
-      {/* Tally Ledger History Card - ADDED */}
+      {/* 3. Tally Ledger History Card */}
       <Card className="border-0 shadow-sm">
         <CardHeader>
           <CardTitle>Tally Ledger History</CardTitle>
           <CardDescription>Upload and manage the curated list of ledgers and sample narrations from Tally.</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex justify-end mb-4">
+          {/* --- START OF ADDITION (3 of 3): New Search and Controls --- */}
+          <div className="flex justify-between items-center mb-4">
+            <div className="relative w-1/3">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <Input
+                placeholder="Search ledgers..."
+                className="pl-9"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setCurrentPage(1); // Reset to first page on new search
+                }}
+              />
+            </div>
             <Button onClick={() => setShowUploadModal(true)}>
               <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
             </Button>
           </div>
-          <div className="space-y-3">
-            {knownLedgers.length > 0 ? (
-              knownLedgers.map(ledger => (
-                <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
-                  <div className="p-4 border rounded-lg flex justify-between items-center hover:bg-slate-50 transition-colors">
-                    <p className="font-semibold text-slate-800">{ledger.ledger_name}</p>
-                    <div className="flex items-center gap-4">
-                      <Badge variant="outline">{ledger.sample_count} samples</Badge>
-                      <ChevronRight className="w-5 h-5 text-slate-400" />
+
+          {/* New Grid Layout */}
+          {ledgersLoading ? (
+            <p className="text-center py-8 text-slate-500">Loading ledgers...</p>
+          ) : ledgersData.ledgers.length > 0 ? (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {ledgersData.ledgers.map(ledger => (
+                  <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
+                    <div className="p-4 border rounded-lg hover:bg-slate-50 hover:shadow-md transition-all h-full">
+                      <p className="font-semibold text-slate-800 truncate" title={ledger.ledger_name}>{ledger.ledger_name}</p>
+                      <div className="flex items-center justify-between mt-2 text-sm text-slate-600">
+                        <span>
+                          {ledger.rule_count > 0 ? (
+                            <CheckCircle2 className="w-4 h-4 inline mr-1 text-green-500" />
+                          ) : (
+                            <AlertCircle className="w-4 h-4 inline mr-1 text-amber-500" />
+                          )}
+                          {ledger.rule_count} rule(s)
+                        </span>
+                        <span>{ledger.sample_count} sample(s)</span>
+                      </div>
                     </div>
-                  </div>
-                </Link>
-              ))
-            ) : (
-              <p className="text-center text-slate-500 py-4">No Tally ledger history has been uploaded yet.</p>
-            )}
-          </div>
+                  </Link>
+                ))}
+              </div>
+
+              {/* Pagination Controls */}
+              <div className="flex items-center justify-between mt-6">
+                <span className="text-sm text-slate-600">
+                  Page {currentPage} of {ledgersData.total_pages}
+                </span>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => p - 1)} disabled={currentPage === 1}>Previous</Button>
+                  <Button variant="outline" size="sm" onClick={() => setCurrentPage(p => p + 1)} disabled={currentPage === ledgersData.total_pages}>Next</Button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="text-center text-slate-500 py-8">No ledgers found. Try adjusting your search or upload a Tally Day Book.</p>
+          )}
+          {/* --- END OF ADDITION (3 of 3) --- */}
         </CardContent>
       </Card>
                  

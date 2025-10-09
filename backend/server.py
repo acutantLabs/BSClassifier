@@ -230,6 +230,20 @@ class TallyVoucherData(BaseModel):
     bank_ledger_name: str
     transactions: List[Dict]
     excluded_ledgers: List[str] = []
+
+class KnownLedgerSummaryWithRuleCount(BaseModel):
+    """A summary of a known ledger, including its rule count."""
+    id: str
+    ledger_name: str
+    sample_count: int
+    rule_count: int
+
+class PaginatedLedgersResponse(BaseModel):
+    """Response model for paginated known ledgers."""
+    total_ledgers: int
+    total_pages: int
+    ledgers: List[KnownLedgerSummaryWithRuleCount]
+
 # Pydantic models for BankAccount data
 class BankAccountBase(BaseModel):
     """Base model for bank account, used for creation and updates."""
@@ -1862,6 +1876,63 @@ async def get_known_ledgers_for_client(client_id: str, db: AsyncSession = Depend
     query = select(models.KnownLedger.ledger_name).where(models.KnownLedger.client_id == client_id).distinct().order_by(models.KnownLedger.ledger_name)
     result = await db.execute(query)
     return result.scalars().all()
+
+@api_router.get("/clients/{client_id}/ledgers", response_model=PaginatedLedgersResponse)
+async def get_paginated_ledgers_for_client(
+    client_id: str, 
+    page: int = Query(1, ge=1),
+    limit: int = Query(12, ge=1, le=100),
+    search: Optional[str] = Query(None),
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Gets a paginated, searchable list of known ledgers with rule counts."""
+    
+    # 1. Subquery to count rules per ledger_name for the specific client
+    rule_counts_subquery = (
+        select(
+            models.LedgerRule.ledger_name,
+            func.count(models.LedgerRule.id).label("rule_count")
+        )
+        .where(models.LedgerRule.client_id == client_id)
+        .group_by(models.LedgerRule.ledger_name)
+        .subquery()
+    )
+
+    # 2. Base query to join ledgers with rule counts
+    base_query = (
+        select(
+            models.KnownLedger.id,
+            models.KnownLedger.ledger_name,
+            func.json_array_length(models.KnownLedger.samples).label("sample_count"),
+            func.coalesce(rule_counts_subquery.c.rule_count, 0).label("rule_count")
+        )
+        .outerjoin(
+            rule_counts_subquery,
+            models.KnownLedger.ledger_name == rule_counts_subquery.c.ledger_name
+        )
+        .where(models.KnownLedger.client_id == client_id)
+    )
+
+    # 3. Apply search filter if provided
+    if search:
+        base_query = base_query.where(models.KnownLedger.ledger_name.ilike(f"%{search}%"))
+
+    # 4. Get total count for pagination before applying limit/offset
+    count_query = select(func.count()).select_from(base_query.alias())
+    total_ledgers = await db.scalar(count_query)
+    total_pages = (total_ledgers + limit - 1) // limit
+
+    # 5. Apply sorting, pagination and execute the final query
+    final_query = base_query.order_by(models.KnownLedger.ledger_name).limit(limit).offset((page - 1) * limit)
+    result = await db.execute(final_query)
+    ledgers = result.mappings().all()
+
+    return PaginatedLedgersResponse(
+        total_ledgers=total_ledgers,
+        total_pages=total_pages,
+        ledgers=[KnownLedgerSummaryWithRuleCount(**row) for row in ledgers]
+    )
+
 
 
 @api_router.get("/clients/{client_id}/known-ledgers/summary", response_model=List[KnownLedgerSummary])
