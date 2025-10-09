@@ -1038,39 +1038,7 @@ const ClientDetailsPage = () => {
         <p className="text-slate-600 mt-2">Manage client statements, accounts, and ledger history.</p>
       </div>
       
-      {/* Tally Ledger History Card - ADDED */}
-      <Card className="border-0 shadow-sm">
-        <CardHeader>
-          <CardTitle>Tally Ledger History</CardTitle>
-          <CardDescription>Upload and manage the curated list of ledgers and sample narrations from Tally.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex justify-end mb-4">
-            <Button onClick={() => setShowUploadModal(true)}>
-              <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
-            </Button>
-          </div>
-          <div className="space-y-3">
-            {knownLedgers.length > 0 ? (
-              knownLedgers.map(ledger => (
-                <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
-                  <div className="p-4 border rounded-lg flex justify-between items-center hover:bg-slate-50 transition-colors">
-                    <p className="font-semibold text-slate-800">{ledger.ledger_name}</p>
-                    <div className="flex items-center gap-4">
-                      <Badge variant="outline">{ledger.sample_count} samples</Badge>
-                      <ChevronRight className="w-5 h-5 text-slate-400" />
-                    </div>
-                  </div>
-                </Link>
-              ))
-            ) : (
-              <p className="text-center text-slate-500 py-4">No Tally ledger history has been uploaded yet.</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-      
-      {/* Processed Statements Card */}
+{/* Processed Statements Card */}
       <Card className="border-0 shadow-sm">
         {/* ... (The content of this card remains exactly the same) ... */}
         <CardHeader>
@@ -1146,7 +1114,39 @@ const ClientDetailsPage = () => {
           </div>
         </CardContent>
       </Card>
-      
+
+      {/* Tally Ledger History Card - ADDED */}
+      <Card className="border-0 shadow-sm">
+        <CardHeader>
+          <CardTitle>Tally Ledger History</CardTitle>
+          <CardDescription>Upload and manage the curated list of ledgers and sample narrations from Tally.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex justify-end mb-4">
+            <Button onClick={() => setShowUploadModal(true)}>
+              <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
+            </Button>
+          </div>
+          <div className="space-y-3">
+            {knownLedgers.length > 0 ? (
+              knownLedgers.map(ledger => (
+                <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
+                  <div className="p-4 border rounded-lg flex justify-between items-center hover:bg-slate-50 transition-colors">
+                    <p className="font-semibold text-slate-800">{ledger.ledger_name}</p>
+                    <div className="flex items-center gap-4">
+                      <Badge variant="outline">{ledger.sample_count} samples</Badge>
+                      <ChevronRight className="w-5 h-5 text-slate-400" />
+                    </div>
+                  </div>
+                </Link>
+              ))
+            ) : (
+              <p className="text-center text-slate-500 py-4">No Tally ledger history has been uploaded yet.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+                 
       {/* Bank Accounts Card */}
       <Card className="border-0 shadow-sm">
         {/* ... (The content of this card remains exactly the same) ... */}
