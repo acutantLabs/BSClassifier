@@ -1409,7 +1409,6 @@ def generate_tally_rows(vouchers: List[Dict], bank_ledger_name: str, voucher_typ
 async def get_voucher_summary(statement_id: str, db: AsyncSession = Depends(database.get_db)):
     """Gets the counts of each voucher type to populate the download modal."""
     
-    # --- THIS IS THE FIX ---
     # Eagerly load the related bank_account and client to prevent session errors.
     query = (
         select(models.BankStatement)
@@ -1442,7 +1441,8 @@ async def get_voucher_summary(statement_id: str, db: AsyncSession = Depends(data
     print("="*50 + "\n")
     # --- END: TEMPORARY DIAGNOSTIC CODE ---
     contra_list = set(bank_account.contra_list or [])
-    
+    filter_list = set(bank_account.filter_list or []) # <-- 1. Load the filter list
+
     receipts = 0
     payments = 0
     contras = 0
@@ -1450,6 +1450,8 @@ async def get_voucher_summary(statement_id: str, db: AsyncSession = Depends(data
     for t in processed_data:
         cr_dr_val = str(t.get("CR/DR", "")).strip().upper()
         ledger = t.get("matched_ledger")
+        if ledger in filter_list:
+            continue
 
         if cr_dr_val.startswith("CR"):
             receipts += 1
@@ -1487,6 +1489,7 @@ async def generate_vouchers(statement_id: str, request: VoucherGenerationRequest
 
     processed_data = statement.processed_data or []
     contra_list = set(bank_account.contra_list or [])
+    filter_list = set(bank_account.filter_list or [])
     bank_ledger_name = bank_account.ledger_name
     
     # Sort data into lists
@@ -1495,6 +1498,8 @@ async def generate_vouchers(statement_id: str, request: VoucherGenerationRequest
         cr_dr_val = str(t.get("CR/DR", "")).strip().upper()
         ledger = t.get("matched_ledger")
 
+        if ledger in filter_list:
+            continue
         if cr_dr_val.startswith("CR"):
             receipt_data.append(t)
         elif cr_dr_val.startswith("DR"):
@@ -1592,6 +1597,58 @@ async def get_client_bank_accounts(client_id: str, db: AsyncSession = Depends(da
     result = await db.execute(query)
     accounts = result.scalars().all()
     return accounts
+
+# --- START OF ADDITION (1 of 2): The UPDATE endpoint ---
+@api_router.put("/bank-accounts/{account_id}", response_model=BankAccountModel)
+async def update_bank_account(
+    account_id: str, 
+    account_data: BankAccountUpdate, 
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Update an existing bank account."""
+    db_account = await db.get(models.BankAccount, account_id)
+    if not db_account:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+
+    # Get the incoming data as a dictionary
+    update_data = account_data.dict(exclude_unset=True)
+    
+    # Update the model's attributes with the new data
+    for key, value in update_data.items():
+        setattr(db_account, key, value)
+        
+    await db.commit()
+    await db.refresh(db_account)
+    return db_account
+# --- END OF ADDITION (1 of 2) ---
+
+
+# --- START OF ADDITION (2 of 2): The DELETE endpoint with safety check ---
+@api_router.delete("/bank-accounts/{account_id}", status_code=204)
+async def delete_bank_account(account_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Delete a bank account after ensuring it has no linked statements."""
+    
+    # CRITICAL: Check for linked statements before deleting
+    stmt_count_query = select(func.count(models.BankStatement.id)).where(
+        models.BankStatement.bank_account_id == account_id
+    )
+    linked_statements_count = await db.scalar(stmt_count_query)
+    
+    if linked_statements_count > 0:
+        raise HTTPException(
+            status_code=400, # Bad Request, because the action is invalid
+            detail=f"Cannot delete account. It is linked to {linked_statements_count} statement(s)."
+        )
+
+    # If check passes, proceed with deletion
+    db_account = await db.get(models.BankAccount, account_id)
+    if not db_account:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+        
+    await db.delete(db_account)
+    await db.commit()
+    return None # Return None for a 204 No Content response
+# --- END OF ADDITION (2 of 2) ---
 
 
 # --- FIND AND REPLACE THE ENTIRE get_client_statements FUNCTION ---

@@ -980,6 +980,10 @@ const ClientDetailsPage = () => {
   const [showAddAccountModal, setShowAddAccountModal] = useState(false);
 
   // New state for Tally ledger history
+  const [showEditAccountModal, setShowEditAccountModal] = useState(false);
+  const [accountToEdit, setAccountToEdit] = useState(null);
+  const [accountToDelete, setAccountToDelete] = useState(null);
+
   const [knownLedgers, setKnownLedgers] = useState([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1043,6 +1047,29 @@ const ClientDetailsPage = () => {
   const handleAccountCreated = (newAccount) => {
     setBankAccounts(prev => [...prev, newAccount]);
     setShowAddAccountModal(false);
+  };
+
+  const handleOpenEditModal = (account) => {
+    setAccountToEdit(account);
+    setShowEditAccountModal(true);
+  };
+
+  const handleAccountUpdated = (updatedAccount) => {
+    setBankAccounts(prev => prev.map(acc => acc.id === updatedAccount.id ? updatedAccount : acc));
+    setShowEditAccountModal(false);
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!accountToDelete) return;
+    try {
+      await axios.delete(`${API}/bank-accounts/${accountToDelete.id}`);
+      toast.success(`Bank account "${accountToDelete.bank_name}" deleted.`);
+      setBankAccounts(prev => prev.filter(acc => acc.id !== accountToDelete.id));
+      setAccountToDelete(null); // Close the dialog
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || "Failed to delete bank account.";
+      toast.error(errorMessage);
+    }
   };
 
   const handleDeleteStatement = async () => {
@@ -1214,9 +1241,8 @@ const ClientDetailsPage = () => {
         </CardContent>
       </Card>
                  
-      {/* Bank Accounts Card */}
+      {/* 2. Bank Accounts Card */}
       <Card className="border-0 shadow-sm">
-        {/* ... (The content of this card remains exactly the same) ... */}
         <CardHeader>
           <CardTitle>Bank Accounts</CardTitle>
           <CardDescription>Manage the bank accounts associated with this client.</CardDescription>
@@ -1236,7 +1262,16 @@ const ClientDetailsPage = () => {
                     <p className="font-bold">{account.bank_name}</p>
                     <p className="text-sm text-slate-500">{account.ledger_name}</p>
                   </div>
-                  <Button variant="outline" size="sm">Edit</Button>
+                  {/* --- START OF ADDITION (3 of 3): Edit and Delete Buttons --- */}
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => handleOpenEditModal(account)}>
+                      <Edit className="w-4 h-4 mr-1" /> Edit
+                    </Button>
+                    <Button variant="destructive" size="sm" onClick={() => setAccountToDelete(account)}>
+                      <Trash2 className="w-4 h-4 mr-1" /> Delete
+                    </Button>
+                  </div>
+                  {/* --- END OF ADDITION (3 of 3) --- */}
                 </div>
               ))
             ) : (
@@ -1277,6 +1312,29 @@ const ClientDetailsPage = () => {
           <div className="flex justify-end gap-4 pt-4">
             <Button variant="outline" onClick={() => setStatementToDelete(null)}>Cancel</Button>
             <Button variant="destructive" onClick={handleDeleteStatement}>Confirm Delete</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <EditBankAccountModal
+        isOpen={showEditAccountModal}
+        onClose={() => setShowEditAccountModal(false)}
+        account={accountToEdit}
+        onSuccess={handleAccountUpdated}
+      />
+
+      <Dialog open={!!accountToDelete} onOpenChange={(isOpen) => !isOpen && setAccountToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Bank Account?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete the account <span className="font-bold">"{accountToDelete?.bank_name}"</span>? 
+              This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button variant="outline" onClick={() => setAccountToDelete(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteAccount}>Confirm Delete</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -1465,7 +1523,90 @@ const AddBankAccountModal = ({ isOpen, onClose, clientId, onSuccess }) => {
   );
 };
 
+// --- START OF ADDITION (1 of 3) ---
+const EditBankAccountModal = ({ isOpen, onClose, account, onSuccess }) => {
+  const [bankName, setBankName] = useState('');
+  const [ledgerName, setLedgerName] = useState('');
+  const [contraList, setContraList] = useState('');
+  const [filterList, setFilterList] = useState('');
+  const [loading, setLoading] = useState(false);
 
+  // Pre-fill the form when the modal opens or the account prop changes
+  useEffect(() => {
+    if (account) {
+      setBankName(account.bank_name || '');
+      setLedgerName(account.ledger_name || '');
+      // Convert arrays back to comma-separated strings for the textarea
+      setContraList((account.contra_list || []).join(', '));
+      setFilterList((account.filter_list || []).join(', '));
+    }
+  }, [account]);
+
+  const handleSubmit = async () => {
+    if (!bankName || !ledgerName) {
+      toast.error("Bank Name and Ledger Name are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const payload = {
+        client_id: account.client_id, // Use the client_id from the existing account
+        bank_name: bankName,
+        ledger_name: ledgerName,
+        contra_list: contraList.split(',').map(s => s.trim()).filter(Boolean),
+        filter_list: filterList.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      
+      const response = await axios.put(`${API}/bank-accounts/${account.id}`, payload);
+      toast.success("Bank account updated successfully!");
+      onSuccess(response.data); // Pass the updated account data back to the parent
+    } catch (error) {
+      toast.error("Failed to update bank account.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit Bank Account</DialogTitle>
+          <DialogDescription>
+            Update the details for: <span className="font-bold">{account?.bank_name}</span>
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div>
+            <Label>Bank Name</Label>
+            <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="e.g., IDBI Bank" />
+          </div>
+          <div>
+            <Label>Ledger Name</Label>
+            <Input value={ledgerName} onChange={(e) => setLedgerName(e.target.value)} placeholder="e.g., IDBI Bank_12467" />
+          </div>
+          <div>
+            <Label>Contra Ledgers (comma-separated)</Label>
+            <Textarea value={contraList} onChange={(e) => setContraList(e.target.value)} placeholder="e.g., ICICI Bank_..., Cash" />
+          </div>
+          <div>
+            <Label>Filter List (comma-separated)</Label>
+            <Textarea value={filterList} onChange={(e) => setFilterList(e.target.value)} placeholder="e.g., IDBI 4003" />
+          </div>
+        </div>
+        <div className="flex justify-end gap-4 pt-4">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSubmit} disabled={loading}>
+            {loading ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+// --- END OF ADDITION (1 of 3) ---
 // --- ADD THIS ENTIRE CONSTANT ---
 const REGEX_BUILDING_BLOCKS = [
   { label: "Starts With", snippet: "^", description: "start of the line" },
@@ -2816,13 +2957,67 @@ const Navigation = () => {
 
 
 // --- FIND AND REPLACE THE ENTIRE RuleEditModal COMPONENT ---
-const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess }) => {
+const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalSamples = [] }) => {
   const [ledgerName, setLedgerName] = useState('');
   const [regexPattern, setRegexPattern] = useState('');
   const [loading, setLoading] = useState(false);
-  const [validationResults, setValidationResults] = useState([]);
+  const [testResults, setTestResults] = useState({ originals: [], additionals: [] });
   const isEditing = !!rule;
+  
+  const decodeRegex = (regex) => {
+    if (!regex || !regex.trim()) return [];
+    const keywordMatches = [...regex.matchAll(/\\b([A-Za-z0-9_ -]+)\\b/g)];
+    if (keywordMatches.length === 0) {
+      return [[{ type: 'error', text: "Could not find any whole words to explain in this pattern." }]];
+    }
+    const explanation = [];
+    explanation.push([
+      { type: 'intro', text: 'The text must contain ' },
+      { type: 'keyword_punctuation', text: 'the word "' },
+      { type: 'keyword_text', text: keywordMatches[0][1] },
+      { type: 'keyword_punctuation', text: '"' }
+    ]);
+    for (let i = 1; i < keywordMatches.length; i++) {
+      explanation.push([
+        { type: 'connector', text: '   followed (anywhere later) by ' },
+        { type: 'keyword_punctuation', text: 'the word "' },
+        { type: 'keyword_text', text: keywordMatches[i][1] },
+        { type: 'keyword_punctuation', text: '"' }
+      ]);
+    }
+    return explanation;
+  };
+   useEffect(() => {
+    if (rule) {
+      setLedgerName(rule.ledger_name);
+      setRegexPattern(rule.regex_pattern);
+    } else {
+      setLedgerName('');
+      setRegexPattern('');
+    }
+  }, [rule]);
 
+  // Enhanced Live validation useEffect
+  useEffect(() => {
+    const originalNarrations = rule?.sample_narrations || [];
+    const originalSet = new Set(originalNarrations);
+
+    const additionalNarrations = (additionalSamples || [])
+      .map(s => s.narration)
+      .filter(narration => !originalSet.has(narration)); // De-duplicate
+
+    const runTest = (narration) => {
+      const { html, matches } = getHighlightedHtml(regexPattern, narration);
+      return { narration, html, matches };
+    };
+
+    setTestResults({
+      originals: originalNarrations.map(runTest),
+      additionals: additionalNarrations.map(runTest)
+    });
+
+  }, [regexPattern, rule, additionalSamples, getHighlightedHtml]); // Added dependencies
+// --- END OF REPLACEMENT ---
   // Helper function for highlighting (reused from ClusterCard)
   const getHighlightedHtml = (regexStr, text) => {
     if (!text) return { html: '', matches: false };
@@ -2840,30 +3035,7 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess }) => {
     }
   };
 
-  // Pre-fill form when a rule is passed in
-  useEffect(() => {
-    if (rule) {
-      setLedgerName(rule.ledger_name);
-      setRegexPattern(rule.regex_pattern);
-    } else {
-      setLedgerName('');
-      setRegexPattern('');
-    }
-  }, [rule]);
-
-  // Live validation useEffect
-  useEffect(() => {
-    if (isEditing && rule?.sample_narrations) {
-      const results = rule.sample_narrations.map(narration => {
-        const { html, matches } = getHighlightedHtml(regexPattern, narration);
-        return { narration, html, matches };
-      });
-      setValidationResults(results);
-    } else {
-      setValidationResults([]);
-    }
-  }, [regexPattern, rule, isEditing]);
-
+  
   const handleSubmit = async () => {
     if (!ledgerName.trim() || !regexPattern.trim()) {
       toast.error("Ledger Name and Regex Pattern are required.");
@@ -2903,26 +3075,61 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess }) => {
             <Label>Regex Pattern</Label>
             <Textarea value={regexPattern} onChange={(e) => setRegexPattern(e.target.value)} placeholder="e.g., .*STAPLES.*" className="font-mono" />
           </div>
-
-          {isEditing && validationResults.length > 0 && (
+          {/* --- START OF ADDITION: Regex Decoder --- */}
+          <div className="mt-2 p-3 bg-slate-800 text-slate-300 rounded-md font-mono text-xs">
+            <p className="font-bold text-white mb-1">Explanation:</p>
+            <div>
+              {decodeRegex(regexPattern).map((line, lineIndex) => (
+                <div key={lineIndex}>
+                  {line.map((part, partIndex) => (
+                    <span key={partIndex} className={
+                      part.type === 'keyword_text' ? 'text-green-400 font-bold' :
+                      part.type === 'keyword_punctuation' ? 'text-pink-400 font-semibold' :
+                      part.type === 'connector' ? 'text-amber-400' : 'text-slate-300'
+                    }>
+                      {part.text}
+                    </span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* --- END OF ADDITION: Regex Decoder --- */}
+            {(testResults.originals.length > 0 || testResults.additionals.length > 0) && (
             <>
               <Separator />
               <div className="space-y-2">
-                <Label>Live Test Against Sample Narrations</Label>
-                <ScrollArea className="h-40 p-2 border rounded-md bg-slate-50">
-                  <div className="text-xs space-y-2">
-                    {validationResults.map((result, index) => (
-                      <div key={index} className="flex items-start gap-2">
-                        <div className="flex-shrink-0 pt-0.5">
-                          {result.matches ? (
-                            <Check className="w-4 h-4 text-green-600" />
-                          ) : (
-                            <X className="w-4 h-4 text-red-600" />
-                          )}
-                        </div>
-                        <div className="flex-grow" dangerouslySetInnerHTML={{ __html: result.html }} />
+                <Label>Live Test Results</Label>
+                <ScrollArea className="h-60 p-2 border rounded-md bg-slate-50">
+                  <div className="text-xs space-y-3">
+                    {/* Original Samples Section */}
+                    {testResults.originals.length > 0 && (
+                      <div>
+                        <p className="font-semibold mb-1">Original Samples:</p>
+                        {testResults.originals.map((result, index) => (
+                          <div key={`orig-${index}`} className="flex items-start gap-2">
+                            <div className="flex-shrink-0 pt-0.5">
+                              {result.matches ? <Check className="w-4 h-4 text-green-600" /> : <X className="w-4 h-4 text-red-600" />}
+                            </div>
+                            <div className="flex-grow" dangerouslySetInnerHTML={{ __html: result.html }} />
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
+                    {/* Additional Samples Section */}
+                    {testResults.additionals.length > 0 && (
+                      <div>
+                        <p className="font-semibold mt-2 mb-1">Additional Samples from History:</p>
+                        {testResults.additionals.map((result, index) => (
+                          <div key={`add-${index}`} className="flex items-start gap-2">
+                            <div className="flex-shrink-0 pt-0.5">
+                              {result.matches ? <Check className="w-4 h-4 text-green-600" /> : <X className="w-4 h-4 text-red-600" />}
+                            </div>
+                            <div className="flex-grow" dangerouslySetInnerHTML={{ __html: result.html }} />
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </ScrollArea>
               </div>
