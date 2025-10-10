@@ -1,4 +1,5 @@
 import logo from './assets/logo.png'; // Assuming your logo is in src/assets/
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useParams } from 'react-router-dom';
@@ -2208,24 +2209,261 @@ const StickyTableHeader = ({ isAllSelected, onToggleAll }) => {
     </div>
   );
 };
+const LedgerDistributionChart = ({ data }) => {
+  // Define a color palette
+  const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
+  const SPECIAL_COLORS = {
+    'Unclassified': '#b0b0b0', // Gray for soft suspense
+    'Manual Suspense': '#d0a000', // Amber/Gold for hard suspense
+  };
+
+  if (!data || data.length === 0) {
+    return <div className="text-center text-sm text-slate-500">No data for chart.</div>;
+  }
+
+  return (
+    <ResponsiveContainer width="100%" height={120}>
+      <PieChart>
+        <Pie
+          data={data}
+          cx="50%"
+          cy="50%"
+          labelLine={false}
+          outerRadius={50}
+          fill="#8884d8"
+          dataKey="value"
+        >
+          {data.map((entry, index) => (
+            <Cell key={`cell-${index}`} fill={SPECIAL_COLORS[entry.name] || COLORS[index % COLORS.length]} />
+          ))}
+        </Pie>
+        <Tooltip
+          contentStyle={{
+            background: 'white',
+            border: '1px solid #ddd',
+            borderRadius: '0.5rem',
+            fontSize: '12px',
+          }}
+          formatter={(value, name) => [`${value} transaction(s)`, name]}
+        />
+      </PieChart>
+    </ResponsiveContainer>
+  );
+};
+
+const StatementPageHeader = ({
+  client,
+  bankAccount,
+  statement,
+  stats
+}) => {
+  if (!client || !bankAccount || !statement || !stats) {
+    return <div>Loading header...</div>;
+  }
+
+  const {
+    totalCount,
+    classifiedPercentage,
+    hardSuspensePercentage,
+    totalInflow,
+    totalOutflow,
+    softSuspenseCount,
+    unclassifiedDebitCount,
+    unclassifiedCreditCount,
+    chartData
+  } = stats;
+
+  return (
+    <div className="mb-8">
+      {/* Breadcrumb Section */}
+      <div className="mb-4">
+        <h2 className="text-lg font-semibold text-slate-800">
+          {client.name} &gt; {bankAccount.ledger_name}
+        </h2>
+        <p className="text-sm text-slate-500">{statement.filename}</p>
+        {/* We need to calculate statement_period, will do in parent component */}
+      </div>
+
+      {/* Stats Dashboard Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 border rounded-lg p-4 bg-slate-50/50">
+        {/* Left Column: Progress */}
+        <div className="lg:col-span-2 space-y-3">
+          <div className="flex justify-between items-center">
+            <h3 className="font-semibold text-slate-700">Classification Progress</h3>
+            <span className="text-sm font-bold text-slate-800">
+              {((classifiedPercentage || 0) + (hardSuspensePercentage || 0)).toFixed(1)}% Complete
+            </span>
+          </div>
+          {/* Stacked Progress Bar */}
+          <div className="w-full h-4 bg-slate-200 rounded-full flex overflow-hidden">
+            <div
+              className="bg-green-500 h-full"
+              style={{ width: `${classifiedPercentage}%` }}
+              title={`Matched: ${classifiedPercentage.toFixed(1)}%`}
+            />
+            <div
+              className="bg-yellow-500 h-full"
+              style={{ width: `${hardSuspensePercentage}%` }}
+              title={`Manual Suspense: ${hardSuspensePercentage.toFixed(1)}%`}
+            />
+          </div>
+          <div className="flex justify-between text-xs text-slate-600">
+            <span>Total Inflow: <span className="font-bold">₹{totalInflow.toLocaleString('en-IN')}</span></span>
+            <span>Total Outflow: <span className="font-bold">₹{totalOutflow.toLocaleString('en-IN')}</span></span>
+            <span>Pending Review: <span className="font-bold">{softSuspenseCount} ({unclassifiedDebitCount} Dr, {unclassifiedCreditCount} Cr)</span></span>
+          </div>
+        </div>
+        {/* Right Column: Pie Chart */}
+        <div className="space-y-2">
+           <h3 className="font-semibold text-slate-700 text-center">Ledger Distribution</h3>
+           <LedgerDistributionChart data={chartData} />
+        </div>
+      </div>
+    </div>
+  );
+};
 // Statement Classification Page Component
 const StatementDetailsPage = () => {
   const { statementId } = useParams();
+
   const [statement, setStatement] = useState(null);
+  const [client, setClient] = useState(null);
+  const [bankAccount, setBankAccount] = useState(null);
   const [classificationResult, setClassificationResult] = useState(null);
+
   const [loading, setLoading] = useState(true); // Renamed from 'loading'
   const [classifying, setClassifying] = useState(false);
+  const [pageStats, setPageStats] = useState(null);
+
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
   const [voucherData, setVoucherData] = useState(null);
-  const [isStateDirty, setIsStateDirty] = useState(false);
   const [detachedTransactions, setDetachedTransactions] = useState([]);
   const [knownLedgers, setKnownLedgers] = useState([]);
-
   const [selectedTxIds, setSelectedTxIds] = useState(new Set());
 
   const classifiedTxns = useMemo(() => {
     return classificationResult?.classified_transactions || [];
   }, [classificationResult]);
+
+
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      setLoading(true);
+      try {
+        // Step 1: Fetch the primary statement FIRST and wait for it.
+        const statementRes = await axios.get(`${API}/statements/${statementId}`);
+        const stmtData = statementRes.data;
+        setStatement(stmtData);
+
+        // Check if we have the necessary IDs before proceeding.
+        if (!stmtData.client_id || !stmtData.bank_account_id) {
+            throw new Error("Statement data is missing required client or bank account IDs.");
+        }
+
+        // Step 2: Now that we have the IDs, fetch all other data in parallel.
+        const [clientRes, bankAccountRes, classificationRes, knownLedgersRes] = await Promise.all([
+          axios.get(`${API}/clients/${stmtData.client_id}`),
+          axios.get(`${API}/bank-accounts/${stmtData.bank_account_id}`),
+          axios.post(`${API}/classify-transactions/${statementId}`),
+          axios.get(`${API}/clients/${stmtData.client_id}/known-ledgers`),
+        ]);
+
+        setClient(clientRes.data);
+        setBankAccount(bankAccountRes.data);
+        setKnownLedgers(knownLedgersRes.data);
+        
+        // Tag transactions with temp IDs for UI state management
+        let counter = 0;
+        const tagWithId = (t) => ({ ...t, _tempId: counter++ });
+        const taggedClassified = classificationRes.data.classified_transactions.map(tagWithId);
+        const taggedClusters = classificationRes.data.unmatched_clusters.map(cluster => ({
+          ...cluster,
+          transactions: cluster.transactions.map(tagWithId)
+        }));
+        
+        setClassificationResult({
+          ...classificationRes.data,
+          classified_transactions: taggedClassified,
+          unmatched_clusters: taggedClusters
+        });
+
+      } catch (error) {
+        toast.error("Failed to load statement details. The record may be incomplete.");
+        console.error("Initial data fetch error:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchInitialData();
+  }, [statementId]);
+
+  // --- START: NEW STATS CALCULATION LOGIC ---
+  useEffect(() => {
+    if (!classificationResult) return;
+
+    const allTransactions = [
+      ...classificationResult.classified_transactions,
+      ...classificationResult.unmatched_clusters.flatMap(c => c.transactions)
+    ];
+    const totalCount = allTransactions.length;
+    if (totalCount === 0) return;
+
+    let classifiedCount = 0;
+    let hardSuspenseCount = 0;
+    let softSuspenseCount = 0;
+    let totalInflow = 0;
+    let totalOutflow = 0;
+    let unclassifiedDebitCount = 0;
+    let unclassifiedCreditCount = 0;
+    const ledgerCounts = {};
+
+    for (const tx of classificationResult.classified_transactions) {
+      const isCredit = (tx['CR/DR'] || '').startsWith('CR');
+      const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
+
+      if (isCredit) totalInflow += amount;
+      else totalOutflow += amount;
+
+      if (tx.matched_ledger === 'Suspense' && tx.user_confirmed) {
+        hardSuspenseCount++;
+        ledgerCounts['Manual Suspense'] = (ledgerCounts['Manual Suspense'] || 0) + 1;
+      } else if (tx.matched_ledger !== 'Suspense') {
+        classifiedCount++;
+        ledgerCounts[tx.matched_ledger] = (ledgerCounts[tx.matched_ledger] || 0) + 1;
+      }
+    }
+    
+    for (const tx of classificationResult.unmatched_clusters.flatMap(c => c.transactions)) {
+        softSuspenseCount++;
+        const isCredit = (tx['CR/DR'] || '').startsWith('CR');
+        const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
+        if (isCredit) {
+            totalInflow += amount;
+            unclassifiedCreditCount++;
+        } else {
+            totalOutflow += amount;
+            unclassifiedDebitCount++;
+        }
+    }
+    if (softSuspenseCount > 0) {
+        ledgerCounts['Unclassified'] = softSuspenseCount;
+    }
+
+    setPageStats({
+      totalCount,
+      classifiedPercentage: (classifiedCount / totalCount) * 100,
+      hardSuspensePercentage: (hardSuspenseCount / totalCount) * 100,
+      totalInflow,
+      totalOutflow,
+      softSuspenseCount,
+      unclassifiedDebitCount,
+      unclassifiedCreditCount,
+      chartData: Object.entries(ledgerCounts).map(([name, value]) => ({ name, value })),
+    });
+
+  }, [classificationResult]);
+  // --- END: NEW STATS CALCULATION LOGIC --
 
   const handleToggleRow = (txId) => {
     setSelectedTxIds(prev => {
@@ -2395,13 +2633,6 @@ const StatementDetailsPage = () => {
     }
   };
 
-  useEffect(() => {
-    if (isStateDirty && classificationResult) {
-      saveClassificationState(classificationResult);
-      setIsStateDirty(false);
-    }
-  }, [classificationResult, isStateDirty]);
-
   const handleMarkAsSuspense = async (transactionsToMark) => {
     if (!classificationResult) return;
     const idsToUpdate = new Set(transactionsToMark.map(t => t._tempId));
@@ -2490,7 +2721,6 @@ const StatementDetailsPage = () => {
     setClassificationResult(newResult);
 
     // Mark state dirty so save effect can persist if required
-    setIsStateDirty(true);
     toast.info('Transaction detached for re-clustering.');
   };
   // --- END ADDITION ---
@@ -2580,36 +2810,7 @@ const StatementDetailsPage = () => {
       setClassifying(false);
     }
   };
-  // --- END OF NEW HANDLER ---
-  useEffect(() => {
-  const fetchStatement = async () => {
-    setLoading(true);
-    try {
-      const response = await axios.get(`${API}/statements/${statementId}`);
-      setStatement(response.data);
-    } catch (error) {
-      toast.error("Failed to fetch statement details.");
-      setStatement(null); // Clear statement on error
-    } finally {
-      setLoading(false);
-    }
-  };
-  fetchStatement();
-  }, [statementId]); // This effect only runs when the statementId changes
 
-  // Effect 2: Run the classification ONLY when the statement has been successfully fetched.
-  useEffect(() => {
-    if (statement && !classificationResult) {
-      runClassification();
-    }
-  }, [statement, classificationResult, runClassification]);
-
-   useEffect(() => {
-    if (isStateDirty && classificationResult) {
-      saveClassificationState(classificationResult);
-      setIsStateDirty(false); // Reset the dirty flag after saving
-    }
-  }, [classificationResult, isStateDirty]); // Dependency array
 
   // --- ADD THIS LOGIC inside StatementDetailsPage, before the return statement ---
   const otherNarrations = useMemo(() => {
@@ -2620,8 +2821,8 @@ const StatementDetailsPage = () => {
             .map(t => t.Narration);
     }, [classificationResult]);
 
-  if (loading || !classificationResult) {
-    return <div>Loading classification results...</div>;
+  if (loading || !classificationResult || !pageStats) {
+    return <div>Loading and processing statement...</div>;
   }
    const classifiedTxnsToShow = (classificationResult?.classified_transactions || []).filter(
     t => t.matched_ledger !== "Suspense" || t.user_confirmed === true
@@ -2631,23 +2832,30 @@ const StatementDetailsPage = () => {
   
   return (
     <div className="space-y-8">
+      {/* --- START OF ADDITION (3 of 3): Render the new header --- */}
+      <StatementPageHeader
+        client={client}
+        bankAccount={bankAccount}
+        statement={statement}
+        stats={pageStats}
+      />
+      {/* --- END OF ADDITION (3 of 3) --- */}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Classification Review</h1>
           <p className="text-slate-600 mt-2">
-            {classificationResult.matched_transactions} of {classificationResult.total_transactions} transactions matched.
+            {(pageStats.totalCount - pageStats.softSuspenseCount)} of {pageStats.totalCount} transactions classified.
           </p>
         </div>
-         <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <Button onClick={handleGenerateVouchers} disabled={classifying} className="bg-blue-600 hover:bg-blue-700">
             <Download className="w-4 h-4 mr-2" />
-              Generate Vouchers
+            Generate Vouchers
           </Button>
-          {/* --- END OF ADDITION --- */}
-        <Button onClick={() => runClassification(true)} disabled={classifying}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
-          Re-classify
-        </Button>
+          <Button onClick={() => runClassification(true)} disabled={classifying}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />
+            Re-classify
+          </Button>
         </div>
       </div>
 
@@ -2667,7 +2875,7 @@ const StatementDetailsPage = () => {
                 key={cluster.cluster_id} 
                 cluster={cluster} 
                 clientId={statement.client_id}
-                onRuleCreated={runClassification}
+                onRuleCreated={() => runClassification(true)}
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
                 onMarkAsSuspense={handleMarkAsSuspense} // <-- ADD THIS

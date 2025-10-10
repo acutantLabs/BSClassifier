@@ -186,6 +186,7 @@ class BankStatement(BaseModel):
     client_id: str
     filename: str
     upload_date: datetime
+    bank_account_id: Optional[str] = None # <-- ADD THIS LINE
     column_mapping: Dict[str, Optional[str]]
     statement_format: str
     
@@ -1622,6 +1623,13 @@ async def update_bank_account(
     return db_account
 # --- END OF ADDITION (1 of 2) ---
 
+@api_router.get("/bank-accounts/{account_id}", response_model=BankAccountModel)
+async def get_bank_account(account_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Get a single bank account by its ID."""
+    db_account = await db.get(models.BankAccount, account_id)
+    if not db_account:
+        raise HTTPException(status_code=404, detail="Bank account not found")
+    return db_account
 
 # --- START OF ADDITION (2 of 2): The DELETE endpoint with safety check ---
 @api_router.delete("/bank-accounts/{account_id}", status_code=204)
