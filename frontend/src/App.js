@@ -2222,14 +2222,14 @@ const LedgerDistributionChart = ({ data }) => {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={120}>
+    <ResponsiveContainer width="100%" height={250}>
       <PieChart>
         <Pie
           data={data}
           cx="50%"
           cy="50%"
           labelLine={false}
-          outerRadius={50}
+          outerRadius={125}
           fill="#8884d8"
           dataKey="value"
         >
@@ -2251,26 +2251,26 @@ const LedgerDistributionChart = ({ data }) => {
   );
 };
 
+// --- FIND AND REPLACE THE ENTIRE StatementPageHeader COMPONENT ---
 const StatementPageHeader = ({
   client,
   bankAccount,
   statement,
-  stats
+  stats,
+  statementPeriod // <-- New Prop
 }) => {
-  if (!client || !bankAccount || !statement || !stats) {
+  if (!client || !statement || !stats) { // bankAccount can be null for old statements
     return <div>Loading header...</div>;
   }
 
   const {
-    totalCount,
-    classifiedPercentage,
-    hardSuspensePercentage,
-    totalInflow,
-    totalOutflow,
-    softSuspenseCount,
-    unclassifiedDebitCount,
-    unclassifiedCreditCount,
-    chartData
+    classifiedPercentage, hardSuspensePercentage,
+    totalInflow, totalOutflow,
+    softSuspenseCount, unclassifiedDebitCount, unclassifiedCreditCount,
+    chartData,
+    totalCount, totalCreditTxs, totalDebitTxs,
+    largestCredit, largestDebit,
+    receiptCount, paymentCount, contraCount, filteredCount
   } = stats;
 
   return (
@@ -2278,50 +2278,84 @@ const StatementPageHeader = ({
       {/* Breadcrumb Section */}
       <div className="mb-4">
         <h2 className="text-lg font-semibold text-slate-800">
-          {client.name} &gt; {bankAccount.ledger_name}
+          {client.name} 
+          {bankAccount ? ` > ${bankAccount.ledger_name}` : ' > (No Linked Account)'}
         </h2>
         <p className="text-sm text-slate-500">{statement.filename}</p>
-        {/* We need to calculate statement_period, will do in parent component */}
       </div>
 
-      {/* Stats Dashboard Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 border rounded-lg p-4 bg-slate-50/50">
-        {/* Left Column: Progress */}
-        <div className="lg:col-span-2 space-y-3">
-          <div className="flex justify-between items-center">
-            <h3 className="font-semibold text-slate-700">Classification Progress</h3>
-            <span className="text-sm font-bold text-slate-800">
-              {((classifiedPercentage || 0) + (hardSuspensePercentage || 0)).toFixed(1)}% Complete
-            </span>
+      {/* Stats Dashboard Section - NEW LAYOUT */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 border rounded-lg p-4 bg-slate-50/50">
+        
+        {/* Left Column Group */}
+        <div className="lg:col-span-3 flex flex-col gap-4">
+          {/* Top-Left Card: Progress */}
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <h3 className="font-semibold text-slate-700">Classification Progress</h3>
+              <span className="text-sm font-bold text-slate-800">
+                {((classifiedPercentage || 0) + (hardSuspensePercentage || 0)).toFixed(1)}% Complete
+              </span>
+            </div>
+            <div className="w-full h-4 bg-slate-200 rounded-full flex overflow-hidden">
+              <div className="bg-green-500 h-full" style={{ width: `${classifiedPercentage}%` }} title={`Matched: ${classifiedPercentage.toFixed(1)}%`} />
+              <div className="bg-yellow-500 h-full" style={{ width: `${hardSuspensePercentage}%` }} title={`Manual Suspense: ${hardSuspensePercentage.toFixed(1)}%`} />
+            </div>
+            <div className="flex justify-between text-xs text-slate-600">
+              <span>Total Inflow: <span className="font-bold">₹{totalInflow.toLocaleString('en-IN')}</span></span>
+              <span>Total Outflow: <span className="font-bold">₹{totalOutflow.toLocaleString('en-IN')}</span></span>
+              <span>Pending Review: <span className="font-bold">{softSuspenseCount} ({unclassifiedDebitCount} Dr, {unclassifiedCreditCount} Cr)</span></span>
+            </div>
           </div>
-          {/* Stacked Progress Bar */}
-          <div className="w-full h-4 bg-slate-200 rounded-full flex overflow-hidden">
-            <div
-              className="bg-green-500 h-full"
-              style={{ width: `${classifiedPercentage}%` }}
-              title={`Matched: ${classifiedPercentage.toFixed(1)}%`}
-            />
-            <div
-              className="bg-yellow-500 h-full"
-              style={{ width: `${hardSuspensePercentage}%` }}
-              title={`Manual Suspense: ${hardSuspensePercentage.toFixed(1)}%`}
-            />
-          </div>
-          <div className="flex justify-between text-xs text-slate-600">
-            <span>Total Inflow: <span className="font-bold">₹{totalInflow.toLocaleString('en-IN')}</span></span>
-            <span>Total Outflow: <span className="font-bold">₹{totalOutflow.toLocaleString('en-IN')}</span></span>
-            <span>Pending Review: <span className="font-bold">{softSuspenseCount} ({unclassifiedDebitCount} Dr, {unclassifiedCreditCount} Cr)</span></span>
+          
+           {/* Bottom-Left Card: Summary */}
+          <div className="text-xs text-slate-600 border-t pt-4">
+            <h3 className="font-semibold text-slate-700 text-sm mb-3">Statement Summary</h3>
+            <div className="space-y-1.5">
+              <div>
+                <span className="font-medium text-slate-500">Period: </span>
+                <span className="font-bold">{statementPeriod}</span>
+              </div>
+              <div>
+                <span className="font-medium text-slate-500">Total Transactions: </span>
+                <span className="font-bold">{totalCount} ({totalCreditTxs} Cr, {totalDebitTxs} Dr)</span>
+              </div>
+              <div>
+                <span className="font-medium text-slate-500">Largest Credit: </span>
+                <span className="font-bold">
+                  ₹{largestCredit.amount.toLocaleString('en-IN')}
+                  <span className="text-slate-500 font-normal ml-1">({largestCredit.narration})</span>
+                </span>
+              </div>
+              <div>
+                <span className="font-medium text-slate-500">Largest Debit: </span>
+                <span className="font-bold">
+                  ₹{largestDebit.amount.toLocaleString('en-IN')}
+                  <span className="text-slate-500 font-normal ml-1">({largestDebit.narration})</span>
+                </span>
+              </div>
+              <div className="pt-2 border-t mt-2">
+                <span className="font-medium text-slate-500">Export Preview: </span>
+                <span className="font-bold">
+                  {receiptCount} Receipts, {paymentCount} Payments, {contraCount} Contras, {filteredCount} Filtered
+                </span>
+              </div>
+            </div>
           </div>
         </div>
-        {/* Right Column: Pie Chart */}
-        <div className="space-y-2">
+
+        {/* Right Column Group (Pie Chart) */}
+        <div className="lg:col-span-2 space-y-2 flex flex-col">
            <h3 className="font-semibold text-slate-700 text-center">Ledger Distribution</h3>
-           <LedgerDistributionChart data={chartData} />
+           <div className="flex-grow">
+             <LedgerDistributionChart data={chartData} />
+           </div>
         </div>
       </div>
     </div>
   );
 };
+// --- END OF REPLACEMENT ---
 // Statement Classification Page Component
 const StatementDetailsPage = () => {
   const { statementId } = useParams();
@@ -2398,9 +2432,8 @@ const StatementDetailsPage = () => {
     fetchInitialData();
   }, [statementId]);
 
-  // --- START: NEW STATS CALCULATION LOGIC ---
   useEffect(() => {
-    if (!classificationResult) return;
+    if (!classificationResult || !bankAccount) return; // Wait for bankAccount too
 
     const allTransactions = [
       ...classificationResult.classified_transactions,
@@ -2409,61 +2442,101 @@ const StatementDetailsPage = () => {
     const totalCount = allTransactions.length;
     if (totalCount === 0) return;
 
-    let classifiedCount = 0;
-    let hardSuspenseCount = 0;
-    let softSuspenseCount = 0;
-    let totalInflow = 0;
-    let totalOutflow = 0;
-    let unclassifiedDebitCount = 0;
-    let unclassifiedCreditCount = 0;
+    let classifiedCount = 0, hardSuspenseCount = 0, softSuspenseCount = 0;
+    let totalInflow = 0, totalOutflow = 0;
+    let unclassifiedDebitCount = 0, unclassifiedCreditCount = 0;
+    let totalDebitTxs = 0, totalCreditTxs = 0;
+    let largestCredit = { amount: 0, narration: '' }, largestDebit = { amount: 0, narration: '' };
+    let receiptCount = 0, paymentCount = 0, contraCount = 0, filteredCount = 0;
     const ledgerCounts = {};
+    
+    const contraList = new Set(bankAccount.contra_list || []);
+    const filterList = new Set(bankAccount.filter_list || []);
+
+    for (const tx of allTransactions) {
+        const isCredit = (tx['CR/DR'] || '').startsWith('CR');
+        const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
+
+        if (isCredit) {
+            totalCreditTxs++;
+            totalInflow += amount;
+            if (amount > largestCredit.amount) largestCredit = { amount, narration: tx.Narration };
+        } else {
+            totalDebitTxs++;
+            totalOutflow += amount;
+            if (amount > largestDebit.amount) largestDebit = { amount, narration: tx.Narration };
+        }
+    }
 
     for (const tx of classificationResult.classified_transactions) {
+      const ledger = tx.matched_ledger;
       const isCredit = (tx['CR/DR'] || '').startsWith('CR');
-      const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
 
-      if (isCredit) totalInflow += amount;
-      else totalOutflow += amount;
-
-      if (tx.matched_ledger === 'Suspense' && tx.user_confirmed) {
+      if (ledger === 'Suspense' && tx.user_confirmed) {
         hardSuspenseCount++;
         ledgerCounts['Manual Suspense'] = (ledgerCounts['Manual Suspense'] || 0) + 1;
-      } else if (tx.matched_ledger !== 'Suspense') {
+      } else if (ledger !== 'Suspense') {
         classifiedCount++;
-        ledgerCounts[tx.matched_ledger] = (ledgerCounts[tx.matched_ledger] || 0) + 1;
+        ledgerCounts[ledger] = (ledgerCounts[ledger] || 0) + 1;
+        
+        // Export Preview Logic
+        if (filterList.has(ledger)) {
+            filteredCount++;
+        } else if (isCredit) {
+            receiptCount++;
+        } else { // is Debit
+            if (contraList.has(ledger)) {
+                contraCount++;
+            } else {
+                paymentCount++;
+            }
+        }
       }
     }
     
-    for (const tx of classificationResult.unmatched_clusters.flatMap(c => c.transactions)) {
-        softSuspenseCount++;
-        const isCredit = (tx['CR/DR'] || '').startsWith('CR');
-        const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
-        if (isCredit) {
-            totalInflow += amount;
-            unclassifiedCreditCount++;
-        } else {
-            totalOutflow += amount;
-            unclassifiedDebitCount++;
-        }
-    }
+    softSuspenseCount = classificationResult.unmatched_clusters.flatMap(c => c.transactions).length;
     if (softSuspenseCount > 0) {
         ledgerCounts['Unclassified'] = softSuspenseCount;
     }
+    unclassifiedDebitCount = classificationResult.unmatched_clusters.flatMap(c => c.transactions).filter(t => !(t['CR/DR'] || '').startsWith('CR')).length;
+    unclassifiedCreditCount = softSuspenseCount - unclassifiedDebitCount;
 
     setPageStats({
       totalCount,
       classifiedPercentage: (classifiedCount / totalCount) * 100,
       hardSuspensePercentage: (hardSuspenseCount / totalCount) * 100,
-      totalInflow,
-      totalOutflow,
-      softSuspenseCount,
-      unclassifiedDebitCount,
-      unclassifiedCreditCount,
+      totalInflow, totalOutflow,
+      softSuspenseCount, unclassifiedDebitCount, unclassifiedCreditCount,
+      totalCreditTxs, totalDebitTxs,
+      largestCredit, largestDebit,
+      receiptCount, paymentCount, contraCount, filteredCount,
       chartData: Object.entries(ledgerCounts).map(([name, value]) => ({ name, value })),
     });
 
+  }, [classificationResult, bankAccount]); // Add bankAccount as a dependency
+// --- END OF REPLACEMENT ---
+
+const statementPeriod = useMemo(() => {
+    if (!classificationResult) return null;
+
+    const allTransactions = [
+      ...classificationResult.classified_transactions,
+      ...classificationResult.unmatched_clusters.flatMap(c => c.transactions)
+    ];
+
+    const dates = allTransactions
+      .map(tx => tx.Date ? new Date(tx.Date.split('/').reverse().join('-')) : null)
+      .filter(date => date && !isNaN(date));
+      
+    if (dates.length === 0) return "N/A";
+
+    const minDate = new Date(Math.min.apply(null, dates));
+    const maxDate = new Date(Math.max.apply(null, dates));
+
+    const formatDate = (date) => date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+
+    return `${formatDate(minDate)} - ${formatDate(maxDate)}`;
   }, [classificationResult]);
-  // --- END: NEW STATS CALCULATION LOGIC --
 
   const handleToggleRow = (txId) => {
     setSelectedTxIds(prev => {
@@ -2838,6 +2911,7 @@ const StatementDetailsPage = () => {
         bankAccount={bankAccount}
         statement={statement}
         stats={pageStats}
+        statementPeriod={statementPeriod}
       />
       {/* --- END OF ADDITION (3 of 3) --- */}
       <div className="flex justify-between items-center">
