@@ -3239,13 +3239,15 @@ const Navigation = () => {
 
 
 // --- FIND AND REPLACE THE ENTIRE RuleEditModal COMPONENT ---
+// --- FIND AND REPLACE THE ENTIRE RuleEditModal COMPONENT ---
 const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalSamples = [] }) => {
   const [ledgerName, setLedgerName] = useState('');
   const [regexPattern, setRegexPattern] = useState('');
   const [loading, setLoading] = useState(false);
   const [testResults, setTestResults] = useState({ originals: [], additionals: [] });
   const isEditing = !!rule;
-  
+
+  // --- START: HELPER FUNCTIONS MOVED TO THE TOP ---
   const decodeRegex = (regex) => {
     if (!regex || !regex.trim()) return [];
     const keywordMatches = [...regex.matchAll(/\\b([A-Za-z0-9_ -]+)\\b/g)];
@@ -3269,7 +3271,27 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
     }
     return explanation;
   };
-   useEffect(() => {
+  
+  // This is now defined before it is used in the useEffect hook below.
+  const getHighlightedHtml = useCallback((regexStr, text) => {
+    if (!text) return { html: '', matches: false };
+    try {
+      const re = new RegExp(regexStr, 'i');
+      const match = text.match(re);
+      if (!match || !match[0] || !regexStr) {
+        return { html: text.replace(/</g, '&lt;'), matches: false };
+      }
+      const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
+      return { html: highlightedHtml, matches: true };
+    } catch (e) {
+      return { html: text.replace(/</g, '&lt;'), matches: false };
+    }
+  }, []);
+  // --- END: HELPER FUNCTIONS MOVED TO THE TOP ---
+
+  // Pre-fill form when a rule is passed in
+  useEffect(() => {
     if (rule) {
       setLedgerName(rule.ledger_name);
       setRegexPattern(rule.regex_pattern);
@@ -3286,7 +3308,7 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
 
     const additionalNarrations = (additionalSamples || [])
       .map(s => s.narration)
-      .filter(narration => !originalSet.has(narration)); // De-duplicate
+      .filter(narration => !originalSet.has(narration));
 
     const runTest = (narration) => {
       const { html, matches } = getHighlightedHtml(regexPattern, narration);
@@ -3298,26 +3320,8 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
       additionals: additionalNarrations.map(runTest)
     });
 
-  }, [regexPattern, rule, additionalSamples, getHighlightedHtml]); // Added dependencies
-// --- END OF REPLACEMENT ---
-  // Helper function for highlighting (reused from ClusterCard)
-  const getHighlightedHtml = (regexStr, text) => {
-    if (!text) return { html: '', matches: false };
-    try {
-      const re = new RegExp(regexStr, 'i');
-      const match = text.match(re);
-      if (!match || !match[0] || !regexStr) {
-        return { html: text.replace(/</g, '&lt;'), matches: false };
-      }
-      const escapedText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const highlightedHtml = escapedText.replace(match[0], `<span class="bg-green-200 font-bold px-1 rounded">${match[0]}</span>`);
-      return { html: highlightedHtml, matches: true };
-    } catch (e) {
-      return { html: text.replace(/</g, '&lt;'), matches: false };
-    }
-  };
+  }, [regexPattern, rule, additionalSamples, getHighlightedHtml]);
 
-  
   const handleSubmit = async () => {
     if (!ledgerName.trim() || !regexPattern.trim()) {
       toast.error("Ledger Name and Regex Pattern are required.");
@@ -3357,7 +3361,7 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
             <Label>Regex Pattern</Label>
             <Textarea value={regexPattern} onChange={(e) => setRegexPattern(e.target.value)} placeholder="e.g., .*STAPLES.*" className="font-mono" />
           </div>
-          {/* --- START OF ADDITION: Regex Decoder --- */}
+
           <div className="mt-2 p-3 bg-slate-800 text-slate-300 rounded-md font-mono text-xs">
             <p className="font-bold text-white mb-1">Explanation:</p>
             <div>
@@ -3376,15 +3380,14 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
               ))}
             </div>
           </div>
-          {/* --- END OF ADDITION: Regex Decoder --- */}
-            {(testResults.originals.length > 0 || testResults.additionals.length > 0) && (
+
+          {(testResults.originals.length > 0 || testResults.additionals.length > 0) && (
             <>
               <Separator />
               <div className="space-y-2">
                 <Label>Live Test Results</Label>
                 <ScrollArea className="h-60 p-2 border rounded-md bg-slate-50">
                   <div className="text-xs space-y-3">
-                    {/* Original Samples Section */}
                     {testResults.originals.length > 0 && (
                       <div>
                         <p className="font-semibold mb-1">Original Samples:</p>
@@ -3398,7 +3401,6 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
                         ))}
                       </div>
                     )}
-                    {/* Additional Samples Section */}
                     {testResults.additionals.length > 0 && (
                       <div>
                         <p className="font-semibold mt-2 mb-1">Additional Samples from History:</p>
@@ -3429,7 +3431,6 @@ const RuleEditModal = ({ isOpen, onClose, rule, clientId, onSuccess, additionalS
   );
 };
 // --- END OF REPLACEMENT ---
-
 // --- ADD THIS ENTIRE NEW PAGE COMPONENT ---
 // In App.js
 
@@ -3587,10 +3588,10 @@ const PatternManagementPage = () => {
         <CardContent>
           {selectedClient ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
                 <thead>
                   <tr className="border-b">
-                    <th className="p-2 text-left font-semibold cursor-pointer hover:bg-slate-50" onClick={() => requestSort('ledger_name')}>
+                    <th className="p-2 text-left font-semibold cursor-pointer hover:bg-slate-50 w-48" onClick={() => requestSort('ledger_name')}>
                       Ledger Name {getSortIcon('ledger_name')}
                     </th>
                     <th className="p-2 text-left font-semibold">Regex Pattern</th>
@@ -3607,16 +3608,21 @@ const PatternManagementPage = () => {
                   {sortedRules.map(rule => (
                     <tr key={rule.id} className="border-b hover:bg-slate-50">
                       <td className="p-2 font-medium">{rule.ledger_name}</td>
-                      <td className="p-2 font-mono text-xs">{rule.regex_pattern}</td>
+                      <td 
+                        className="p-2 font-mono text-xs truncate" 
+                        title={rule.regex_pattern}
+                      >
+                        {rule.regex_pattern}
+                      </td>
                       <td className="p-2">{stats?.[rule.ledger_name]?.total_matches ?? '---'}</td>
                       <td className="p-2">{stats?.[rule.ledger_name]?.last_used ?? '---'}</td>
                       <td className="p-2 text-center">
                         <div className="flex gap-2 justify-center">
-                          <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => handleOpenModal(rule)}>
-                            <Edit className="h-4 w-4" />
+                          <Button variant="outline" size="sm" onClick={() => handleOpenModal(rule)}>
+                            <Edit className="w-4 h-4 mr-1" /> Edit
                           </Button>
-                          <Button variant="destructive" size="icon" className="h-8 w-8" onClick={() => setRuleToDelete(rule)}>
-                            <Trash2 className="h-4 w-4" />
+                          <Button variant="destructive" size="sm" onClick={() => setRuleToDelete(rule)}>
+                            <Trash2 className="w-4 h-4 mr-1" /> Delete
                           </Button>
                         </div>
                       </td>
