@@ -1,8 +1,11 @@
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from pathlib import Path
-from sqlalchemy import select, func, outerjoin
+from sqlalchemy import select, func, outerjoin, delete, exists
 from sqlalchemy.orm import selectinload # <-- ADD THIS
 from typing import List, Dict, Optional, Any, Union, Tuple
 
@@ -30,6 +33,7 @@ import logging
 import json
 import re
 import io
+import asyncio
 
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any, Union
@@ -73,13 +77,6 @@ app = FastAPI(title="Tally Statement Processor", version="1.0.0", lifespan=lifes
 # --- END OF BLOCK TO ADD ---
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-# Add this new function
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Code here runs on startup
-    yield
-    # Code here runs on shutdown
-
 
 # Pydantic models for Client data
 class ClientBase(BaseModel):
@@ -92,6 +89,12 @@ class ClientCreate(ClientBase):
 
 class UpdateTransactionsRequest(BaseModel):
     processed_data: List[Dict[str, Any]]
+
+class AssignClusterToLedgerRequest(BaseModel):
+    """Payload for directly assigning a cluster's transactions to a ledger."""
+    transactions: List[Dict[str, Any]]
+    ledger_name: str
+    add_to_known_ledgers: bool = False
 
 class ClientUpdate(ClientBase):
     """Model used for updating an existing client's name."""
@@ -125,6 +128,9 @@ class ClientModelWithCounts(ClientBase):
     ledger_rule_count: int
     bank_statement_count: int
     bank_account_count: int
+    known_ledger_count: int
+    most_recent_statement_month: Optional[str] = None
+    most_recent_statement_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -233,11 +239,13 @@ class TallyVoucherData(BaseModel):
     excluded_ledgers: List[str] = []
 
 class KnownLedgerSummaryWithRuleCount(BaseModel):
-    """A summary of a known ledger, including its rule count."""
+    """A summary of a known ledger, including its rule count and last activity."""
     id: str
     ledger_name: str
     sample_count: int
     rule_count: int
+    is_active: bool = True
+    last_transaction_date: Optional[str] = None
 
 class PaginatedLedgersResponse(BaseModel):
     """Response model for paginated known ledgers."""
@@ -290,17 +298,59 @@ class KnownLedgerSummary(BaseModel):
     id: str
     ledger_name: str
     sample_count: int
+    is_active: bool = True
+
+
+def compute_last_transaction_date(samples: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """
+    Returns the most recent transaction date (ISO yyyy-mm-dd) from a list of samples.
+    Samples may contain a 'date' field in various formats; we parse with pandas for robustness.
+    """
+    if not samples or not isinstance(samples, list):
+        return None
+    parsed_dates = []
+    for sample in samples:
+        date_str = sample.get("date") if isinstance(sample, dict) else None
+        if not date_str:
+            continue
+        parsed = pd.to_datetime(date_str, dayfirst=True, errors="coerce")
+        if pd.notna(parsed):
+            parsed_dates.append(parsed)
+    if not parsed_dates:
+        return None
+    return max(parsed_dates).date().isoformat()
+
+class LearnLedgersRequest(BaseModel):
+    """Request body for the learn-ledgers endpoint."""
+    statement_ids: List[str]
+    delay_ms: int = 100  # Delay between transactions for visualization
+
+class AcceptLearnedLedgersRequest(BaseModel):
+    """Request body for accepting/rejecting learned ledgers."""
+    accepted_ledgers: List[str] = []  # Ledger names to accept
+    rejected_ledgers: List[str] = []  # Ledger names to reject
+    learning_results: Dict[str, Any] = {}  # The full results from learning phase
+
+class ToggleLedgerActiveRequest(BaseModel):
+    """Request body for toggling ledger active status."""
+    is_active: bool
 
 class SampleModel(BaseModel):
     """Defines the structure of a single transaction sample."""
     narration: str
     amount: float
     type: str # "Credit" or "Debit"
+    date: Optional[str] = None  # DD/MM/YYYY format
 
 class PaginatedSamplesResponse(BaseModel):
     """Response model for paginated samples."""
     total_samples: int
     samples: List[SampleModel]
+
+class DeleteSampleRequest(BaseModel):
+    """Request body for deleting a sample from a ledger."""
+    index: Optional[int] = None
+    sample: Optional[Dict[str, Any]] = None
 
 class ReclassifySubsetRequest(BaseModel):
     """Defines the request body for re-classifying a subset of transactions."""
@@ -698,6 +748,11 @@ async def get_clients(db: AsyncSession = Depends(database.get_db)):
         .group_by(models.BankAccount.client_id)
         .subquery()
     )
+    known_ledger_subquery = (
+        select(models.KnownLedger.client_id, func.count(models.KnownLedger.id).label("known_ledger_count"))
+        .group_by(models.KnownLedger.client_id)
+        .subquery()
+    )
 
     query = (
         select(
@@ -705,23 +760,77 @@ async def get_clients(db: AsyncSession = Depends(database.get_db)):
             func.coalesce(ledger_rule_subquery.c.ledger_rule_count, 0).label("ledger_rule_count"),
             func.coalesce(bank_statement_subquery.c.bank_statement_count, 0).label("bank_statement_count"),
             func.coalesce(bank_account_subquery.c.bank_account_count, 0).label("bank_account_count"),
+            func.coalesce(known_ledger_subquery.c.known_ledger_count, 0).label("known_ledger_count"),
         )
         .outerjoin(ledger_rule_subquery, models.Client.id == ledger_rule_subquery.c.client_id)
         .outerjoin(bank_statement_subquery, models.Client.id == bank_statement_subquery.c.client_id)
         .outerjoin(bank_account_subquery, models.Client.id == bank_account_subquery.c.client_id)
+        .outerjoin(known_ledger_subquery, models.Client.id == known_ledger_subquery.c.client_id)
         .order_by(models.Client.name)
     )
     
     result = await db.execute(query)
     
+    # Fetch all processed statements to determine most recent per client
+    # This requires JSON parsing, so we do it separately
+    processed_statements_query = (
+        select(models.BankStatement)
+        .where(models.BankStatement.processed_data.isnot(None))
+        .order_by(models.BankStatement.upload_date.desc())
+    )
+    processed_statements_result = await db.execute(processed_statements_query)
+    processed_statements = processed_statements_result.scalars().all()
+    
+    # Build a map of client_id -> most recent statement info
+    client_most_recent = {}
+    seen_clients = set()
+    for stmt in processed_statements:
+        if stmt.client_id not in seen_clients:
+            seen_clients.add(stmt.client_id)
+            # Extract month from processed_data
+            month_str = None
+            if isinstance(stmt.processed_data, list) and len(stmt.processed_data) > 0:
+                # Get dates from processed_data (standardized format: DD/MM/YYYY)
+                dates = []
+                for t in stmt.processed_data:
+                    date_str = t.get("Date")
+                    if date_str:
+                        try:
+                            # Handle date string that might have extra text (split on space)
+                            date_part = str(date_str).split(' ')[0] if ' ' in str(date_str) else str(date_str)
+                            # Parse DD/MM/YYYY format using pandas
+                            parsed_date = pd.to_datetime(date_part, format='%d/%m/%Y', errors='coerce')
+                            if pd.notna(parsed_date):
+                                dates.append(parsed_date)
+                        except:
+                            pass
+                
+                if dates:
+                    # Use the maximum date to get the most recent month
+                    max_date = max(dates)
+                    month_str = max_date.strftime('%B, %Y')  # Format: "September, 2025"
+            
+            client_most_recent[stmt.client_id] = {
+                "statement_id": stmt.id,
+                "month": month_str
+            }
+    
     # Process the results more elegantly
     clients_with_counts = []
     for row in result.mappings(): # .mappings() gives us dict-like rows
         client_data = row['Client'].__dict__
+        client_id = client_data['id']
+        
+        # Get most recent statement info for this client
+        most_recent_info = client_most_recent.get(client_id, {})
+        
         client_data.update({
             "ledger_rule_count": row['ledger_rule_count'],
             "bank_statement_count": row['bank_statement_count'],
             "bank_account_count": row['bank_account_count'],
+            "known_ledger_count": row['known_ledger_count'],
+            "most_recent_statement_month": most_recent_info.get("month"),
+            "most_recent_statement_id": most_recent_info.get("statement_id"),
         })
         clients_with_counts.append(ClientModelWithCounts.model_validate(client_data))
 
@@ -758,6 +867,52 @@ async def update_client(client_id: str, client_data: ClientUpdate, db: AsyncSess
     await db.refresh(db_client)
     return db_client
 # --- END OF MISSING ENDPOINT ---
+
+@api_router.delete("/clients/{client_id}", status_code=204)
+async def delete_client(client_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Delete a client and all associated data"""
+    db_client = await db.get(models.Client, client_id)
+    if not db_client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    
+    try:
+        # Delete related records that don't have cascade delete configured
+        # 1. Delete BankStatement records
+        statements_query = select(models.BankStatement).where(
+            models.BankStatement.client_id == client_id
+        )
+        statements_result = await db.execute(statements_query)
+        statements = statements_result.scalars().all()
+        for statement in statements:
+            await db.delete(statement)
+        
+        # 2. Delete KnownLedger records
+        known_ledgers_query = select(models.KnownLedger).where(
+            models.KnownLedger.client_id == client_id
+        )
+        known_ledgers_result = await db.execute(known_ledgers_query)
+        known_ledgers = known_ledgers_result.scalars().all()
+        for ledger in known_ledgers:
+            await db.delete(ledger)
+        
+        # 3. Delete ClassificationFeedback records
+        feedback_query = select(models.ClassificationFeedback).where(
+            models.ClassificationFeedback.client_id == client_id
+        )
+        feedback_result = await db.execute(feedback_query)
+        feedback_records = feedback_result.scalars().all()
+        for feedback in feedback_records:
+            await db.delete(feedback)
+        
+        # 4. Delete the client (this will cascade delete BankAccount and LedgerRule records)
+        await db.delete(db_client)
+        await db.commit()
+        return None  # Return None for 204 No Content response
+        
+    except Exception as e:
+        await db.rollback()
+        logging.error(f"Error deleting client {client_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error deleting client: {str(e)}")
 # File Upload and Processing
 # --- REPLACEMENT for upload_statement ---
 @api_router.post("/upload-statement", response_model=FileUploadResponse)
@@ -1355,6 +1510,189 @@ async def update_transactions(statement_id: str, request: UpdateTransactionsRequ
 # --- END OF ADDITION ---
 # --- ADD THIS ENTIRE ENDPOINT ---
 
+@api_router.post("/statements/{statement_id}/assign-cluster-to-ledger")
+async def assign_cluster_to_ledger(
+    statement_id: str,
+    request: AssignClusterToLedgerRequest,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """
+    Directly assigns a cluster's transactions to a ledger without creating a rule.
+    Optionally adds a new ledger to known ledgers and stores samples.
+    """
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+
+    ledger_name = (request.ledger_name or "").strip()
+    if not ledger_name:
+        raise HTTPException(status_code=400, detail="Ledger name is required")
+
+    incoming = request.transactions or []
+    if not incoming:
+        raise HTTPException(status_code=400, detail="No transactions provided")
+
+    # Reuse canonical key logic from update_transactions
+    def _normalize_narration(n):
+        if not n:
+            return ""
+        s = str(n).strip().lower()
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _normalize_date(d):
+        if not d:
+            return ""
+        s = str(d).split(" ")[0].strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+            except Exception:
+                continue
+        return s.lower()
+
+    def _normalize_amount(a):
+        if a is None:
+            return 0.0
+        try:
+            s = str(a).replace(",", "").strip()
+            return float(s)
+        except Exception:
+            try:
+                return float(re.sub(r"[^\d.-]", "", str(a)))
+            except Exception:
+                return 0.0
+
+    def canonical_key(tx):
+        amount = (
+            tx.get("Amount")
+            if "Amount" in tx
+            else tx.get("Amount (INR)")
+            if "Amount (INR)" in tx
+            else tx.get("amount")
+            if "amount" in tx
+            else tx.get("amt")
+        )
+        return f"{_normalize_narration(tx.get('Narration') or tx.get('narration'))}||{_normalize_date(tx.get('Date') or tx.get('date'))}||{_normalize_amount(amount)}"
+
+    # Prepare incoming updates and collect samples for optional known-ledger insert
+    incoming_map = {}
+    samples_to_add = []
+
+    for tx in incoming:
+        clean_tx = {k: v for k, v in tx.items() if k != "_tempId"}
+        clean_tx["matched_ledger"] = ledger_name
+        clean_tx["user_confirmed"] = True
+        incoming_map[canonical_key(clean_tx)] = clean_tx
+
+        amount_val = tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt") or 0
+        try:
+            amount = float(str(amount_val).replace(",", ""))
+        except Exception:
+            amount = 0.0
+        cr_dr = str(tx.get("CR/DR", "")).strip().upper()
+        trans_type = "Credit" if cr_dr.startswith("CR") else "Debit"
+        tx_date = str(tx.get("Date", "")).split(" ")[0].strip()
+
+        samples_to_add.append(
+            {
+                "narration": tx.get("Narration") or tx.get("narration") or "",
+                "amount": round(amount, 2),
+                "type": trans_type,
+                "date": tx_date,
+            }
+        )
+
+    existing = statement.processed_data or []
+    merged = []
+    processed_keys = set()
+
+    # Merge incoming updates into existing list
+    for orig in existing:
+        key = canonical_key(orig)
+        if key in incoming_map:
+            merged.append({**orig, **incoming_map[key]})
+            processed_keys.add(key)
+        else:
+            merged.append(orig)
+
+    # Append any incoming transactions that didn't match existing keys
+    for key, tx in incoming_map.items():
+        if key in processed_keys:
+            continue
+        merged.append(tx)
+
+    # Final deduplication pass
+    seen = set()
+    final_list = []
+    for tx in merged:
+        k = canonical_key(tx)
+        if k in seen:
+            continue
+        seen.add(k)
+        final_list.append(tx)
+
+    statement.processed_data = final_list
+
+    samples_added = 0
+    ledger_created = False
+    if request.add_to_known_ledgers:
+        MAX_SAMPLES_PER_LEDGER = 25000
+        query = select(models.KnownLedger).where(
+            (models.KnownLedger.client_id == statement.client_id)
+            & (models.KnownLedger.ledger_name == ledger_name)
+        )
+        result = await db.execute(query)
+        db_ledger = result.scalar_one_or_none()
+
+        existing_fingerprints = set()
+        if db_ledger:
+            for s in db_ledger.samples:
+                s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+                if s_narration is None or not s_narration:
+                    continue
+                existing_fingerprints.add(f"{s_narration}|{round(float(s_amount), 2)}|{s_type}|{s_date}")
+
+        clean_samples = []
+        for sample in samples_to_add:
+            sample_date = sample.get("date", "") or ""
+            clean_sample = {
+                "narration": sample["narration"],
+                "amount": round(float(sample["amount"]), 2),
+                "type": sample["type"],
+                "date": sample_date,
+            }
+            fingerprint = f"{clean_sample['narration']}|{clean_sample['amount']}|{clean_sample['type']}|{sample_date}"
+            if fingerprint not in existing_fingerprints:
+                clean_samples.append(clean_sample)
+                existing_fingerprints.add(fingerprint)
+
+        if db_ledger:
+            combined_samples = db_ledger.samples + clean_samples
+            if len(combined_samples) > MAX_SAMPLES_PER_LEDGER:
+                combined_samples = combined_samples[-MAX_SAMPLES_PER_LEDGER:]
+            db_ledger.samples = combined_samples
+        else:
+            db_ledger = models.KnownLedger(
+                client_id=statement.client_id,
+                ledger_name=ledger_name,
+                samples=clean_samples[:MAX_SAMPLES_PER_LEDGER],
+                is_active=True,
+            )
+            db.add(db_ledger)
+            ledger_created = True
+        samples_added = len(clean_samples)
+
+    await db.commit()
+
+    return {
+        "message": "Cluster assigned successfully",
+        "assigned": len(incoming_map),
+        "final_count": len(final_list),
+        "samples_added": samples_added,
+        "ledger_created": ledger_created,
+    }
+
 # --- ADD THIS ENTIRE HELPER FUNCTION ---
 def generate_tally_rows(vouchers: List[Dict], bank_ledger_name: str, voucher_type: str) -> List[List[Any]]:
     """
@@ -1851,6 +2189,16 @@ async def upload_ledger_history(client_id: str, file: UploadFile = File(...), db
             if pd.notna(row.iloc[0]) and isinstance(row.iloc[0], (datetime, pd.Timestamp)):
                 if i + 1 < len(df): # Ensure there is a next row for the narration
                     
+                    # Extract and format date as DD/MM/YYYY
+                    tx_date = ""
+                    try:
+                        if isinstance(row.iloc[0], pd.Timestamp):
+                            tx_date = row.iloc[0].strftime('%d/%m/%Y')
+                        elif isinstance(row.iloc[0], datetime):
+                            tx_date = row.iloc[0].strftime('%d/%m/%Y')
+                    except:
+                        tx_date = ""
+                    
                     ledger_name = str(row.iloc[2]).strip()
                     narration = str(df.iloc[i + 1].iloc[2]).strip()
                     
@@ -1870,8 +2218,9 @@ async def upload_ledger_history(client_id: str, file: UploadFile = File(...), db
                     if ledger_name and narration and trans_type:
                         sample = {
                             "narration": narration,
-                            "amount": float(amount),
-                            "type": trans_type
+                            "amount": round(float(amount), 2),
+                            "type": trans_type,
+                            "date": tx_date
                         }
                         grouped_samples[ledger_name].append(sample)
         
@@ -1903,12 +2252,18 @@ async def upload_ledger_history(client_id: str, file: UploadFile = File(...), db
             else:
                 ledgers_updated += 1
             
-            # Use a set for efficient de-duplication
-            existing_fingerprints = {f"{s['narration']}|{s['amount']}|{s['type']}" for s in db_ledger.samples}
+            # Use a set for efficient de-duplication (include date and round amounts)
+            existing_fingerprints = set()
+            for s in db_ledger.samples:
+                s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+                if s_narration is None or not s_narration:
+                    continue
+                existing_fingerprints.add(f"{s_narration}|{round(float(s_amount), 2)}|{s_type}|{s_date}")
             
             unique_new_samples = []
             for sample in new_samples:
-                fingerprint = f"{sample['narration']}|{sample['amount']}|{sample['type']}"
+                sample_date = sample.get('date', '') or ''
+                fingerprint = f"{sample['narration']}|{round(float(sample['amount']), 2)}|{sample['type']}|{sample_date}"
                 if fingerprint not in existing_fingerprints:
                     unique_new_samples.append(sample)
                     existing_fingerprints.add(fingerprint)
@@ -1936,9 +2291,12 @@ async def upload_ledger_history(client_id: str, file: UploadFile = File(...), db
 
 
 @api_router.get("/clients/{client_id}/known-ledgers", response_model=List[str])
-async def get_known_ledgers_for_client(client_id: str, db: AsyncSession = Depends(database.get_db)):
-    """Gets a simple, distinct list of known ledger names for a client."""
-    query = select(models.KnownLedger.ledger_name).where(models.KnownLedger.client_id == client_id).distinct().order_by(models.KnownLedger.ledger_name)
+async def get_known_ledgers_for_client(client_id: str, include_inactive: bool = Query(False), db: AsyncSession = Depends(database.get_db)):
+    """Gets a simple, distinct list of known ledger names for a client. By default only returns active ledgers."""
+    query = select(models.KnownLedger.ledger_name).where(models.KnownLedger.client_id == client_id)
+    if not include_inactive:
+        query = query.where(models.KnownLedger.is_active == True)
+    query = query.distinct().order_by(models.KnownLedger.ledger_name)
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -1946,8 +2304,9 @@ async def get_known_ledgers_for_client(client_id: str, db: AsyncSession = Depend
 async def get_paginated_ledgers_for_client(
     client_id: str, 
     page: int = Query(1, ge=1),
-    limit: int = Query(12, ge=1, le=100),
+    limit: int = Query(12, ge=1, le=1000),
     search: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
     db: AsyncSession = Depends(database.get_db)
 ):
     """Gets a paginated, searchable list of known ledgers with rule counts."""
@@ -1963,13 +2322,15 @@ async def get_paginated_ledgers_for_client(
         .subquery()
     )
 
-    # 2. Base query to join ledgers with rule counts
-    base_query = (
+    # 2. Query KnownLedger records with rule counts
+    known_ledgers_query = (
         select(
             models.KnownLedger.id,
             models.KnownLedger.ledger_name,
             func.json_array_length(models.KnownLedger.samples).label("sample_count"),
-            func.coalesce(rule_counts_subquery.c.rule_count, 0).label("rule_count")
+            func.coalesce(rule_counts_subquery.c.rule_count, 0).label("rule_count"),
+            models.KnownLedger.is_active,
+            models.KnownLedger.samples
         )
         .outerjoin(
             rule_counts_subquery,
@@ -1978,36 +2339,112 @@ async def get_paginated_ledgers_for_client(
         .where(models.KnownLedger.client_id == client_id)
     )
 
-    # 3. Apply search filter if provided
+    # Apply active filter unless include_inactive is True
+    if not include_inactive:
+        known_ledgers_query = known_ledgers_query.where(models.KnownLedger.is_active == True)
+
+    # Apply search filter if provided
     if search:
-        base_query = base_query.where(models.KnownLedger.ledger_name.ilike(f"%{search}%"))
+        known_ledgers_query = known_ledgers_query.where(models.KnownLedger.ledger_name.ilike(f"%{search}%"))
 
-    # 4. Get total count for pagination before applying limit/offset
-    count_query = select(func.count()).select_from(base_query.alias())
-    total_ledgers = await db.scalar(count_query)
-    total_pages = (total_ledgers + limit - 1) // limit
+    # Execute KnownLedger query
+    known_ledgers_result = await db.execute(known_ledgers_query)
+    known_ledgers_rows = known_ledgers_result.mappings().all()
 
-    # 5. Apply sorting, pagination and execute the final query
-    final_query = base_query.order_by(models.KnownLedger.ledger_name).limit(limit).offset((page - 1) * limit)
-    result = await db.execute(final_query)
-    ledgers = result.mappings().all()
+    # 3. Query rule-only ledgers (ledgers that exist in LedgerRule but not in KnownLedger)
+    rule_only_query = (
+        select(
+            models.LedgerRule.ledger_name,
+            func.count(models.LedgerRule.id).label("rule_count")
+        )
+        .where(
+            models.LedgerRule.client_id == client_id,
+            ~exists(
+                select(1)
+                .where(
+                    models.KnownLedger.client_id == client_id,
+                    models.KnownLedger.ledger_name == models.LedgerRule.ledger_name
+                )
+            )
+        )
+        .group_by(models.LedgerRule.ledger_name)
+    )
+
+    # Apply search filter to rule-only query if provided
+    if search:
+        rule_only_query = rule_only_query.where(models.LedgerRule.ledger_name.ilike(f"%{search}%"))
+
+    # Execute rule-only query
+    rule_only_result = await db.execute(rule_only_query)
+    rule_only_rows = rule_only_result.mappings().all()
+
+    # 4. Build combined list of ledger summaries
+    ledger_summaries = []
+    
+    # Add KnownLedger entries
+    for row in known_ledgers_rows:
+        last_txn_date = compute_last_transaction_date(row.get("samples"))
+        ledger_summaries.append(
+            KnownLedgerSummaryWithRuleCount(
+                id=row["id"],
+                ledger_name=row["ledger_name"],
+                sample_count=row["sample_count"],
+                rule_count=row["rule_count"],
+                is_active=row["is_active"],
+                last_transaction_date=last_txn_date,
+            )
+        )
+    
+    # Add rule-only entries (ledgers with rules but no KnownLedger record)
+    for row in rule_only_rows:
+        ledger_name = row["ledger_name"]
+        rule_count = row["rule_count"]
+        # Generate temporary ID for rule-only ledgers
+        temp_id = f"rule_{ledger_name}"
+        
+        ledger_summaries.append(
+            KnownLedgerSummaryWithRuleCount(
+                id=temp_id,
+                ledger_name=ledger_name,
+                sample_count=0,  # No samples if no KnownLedger
+                rule_count=rule_count,
+                is_active=True,  # Default to active
+                last_transaction_date=None,
+            )
+        )
+
+    # 5. Sort by ledger_name
+    ledger_summaries.sort(key=lambda x: x.ledger_name.lower())
+
+    # 6. Apply pagination
+    total_ledgers = len(ledger_summaries)
+    total_pages = (total_ledgers + limit - 1) // limit if total_ledgers > 0 else 1
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    paginated_ledgers = ledger_summaries[start_idx:end_idx]
 
     return PaginatedLedgersResponse(
         total_ledgers=total_ledgers,
         total_pages=total_pages,
-        ledgers=[KnownLedgerSummaryWithRuleCount(**row) for row in ledgers]
+        ledgers=paginated_ledgers,
     )
 
 
 
 @api_router.get("/clients/{client_id}/known-ledgers/summary", response_model=List[KnownLedgerSummary])
-async def get_known_ledgers_summary(client_id: str, db: AsyncSession = Depends(database.get_db)):
+async def get_known_ledgers_summary(client_id: str, include_inactive: bool = Query(False), db: AsyncSession = Depends(database.get_db)):
     """Gets a summary of all known ledgers for a client, including their sample counts."""
     query = select(
         models.KnownLedger.id,
         models.KnownLedger.ledger_name,
-        func.json_array_length(models.KnownLedger.samples).label("sample_count")
-    ).where(models.KnownLedger.client_id == client_id).order_by(models.KnownLedger.ledger_name)
+        func.json_array_length(models.KnownLedger.samples).label("sample_count"),
+        models.KnownLedger.is_active
+    ).where(models.KnownLedger.client_id == client_id)
+    
+    if not include_inactive:
+        query = query.where(models.KnownLedger.is_active == True)
+    
+    query = query.order_by(models.KnownLedger.ledger_name)
     
     result = await db.execute(query)
     # Use .mappings() to get dict-like rows
@@ -2024,10 +2461,27 @@ async def get_ledger_samples(ledger_id: str, page: int = Query(1, ge=1), limit: 
     all_samples = db_ledger.samples
     total_samples = len(all_samples)
     
+    # Normalize samples to handle malformed data
+    normalized_samples = []
+    for s in all_samples:
+        s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+        # Skip malformed samples that can't be parsed
+        if s_narration is None or not s_narration:
+            continue
+        normalized_samples.append({
+            "narration": s_narration,
+            "amount": s_amount,
+            "type": s_type,
+            "date": s_date
+        })
+    
+    # Update total_samples to reflect only valid samples
+    total_samples = len(normalized_samples)
+    
     # Paginate in Python
     start_index = (page - 1) * limit
     end_index = start_index + limit
-    paginated_samples = all_samples[start_index:end_index]
+    paginated_samples = normalized_samples[start_index:end_index]
 
     return PaginatedSamplesResponse(
         total_samples=total_samples,
@@ -2035,30 +2489,408 @@ async def get_ledger_samples(ledger_id: str, page: int = Query(1, ge=1), limit: 
     )
 
 @api_router.delete("/known-ledgers/{ledger_id}/samples")
-async def delete_ledger_sample(ledger_id: str, sample_to_delete: SampleModel, db: AsyncSession = Depends(database.get_db)):
+async def delete_ledger_sample(ledger_id: str, request: DeleteSampleRequest, db: AsyncSession = Depends(database.get_db)):
     """Deletes a specific sample from a known ledger's sample list."""
     db_ledger = await db.get(models.KnownLedger, ledger_id)
     if not db_ledger:
         raise HTTPException(status_code=404, detail="Ledger not found")
 
-    original_count = len(db_ledger.samples)
-    
-    # Find and remove the matching sample
-    # Note: This relies on exact match of the pydantic model
-    sample_dict = sample_to_delete.dict()
-    updated_samples = [s for s in db_ledger.samples if s != sample_dict]
-    
-    if len(updated_samples) == original_count:
-        raise HTTPException(status_code=404, detail="Sample not found in ledger")
+    samples = db_ledger.samples or []
 
-    db_ledger.samples = updated_samples
+    # Delete by index when provided
+    if request.index is not None:
+        if request.index < 0 or request.index >= len(samples):
+            raise HTTPException(status_code=404, detail="Sample not found in ledger")
+        samples.pop(request.index)
+        db_ledger.samples = samples
+        await db.commit()
+        return {"message": "Sample deleted successfully."}
+
+    # Otherwise delete by matching sample content (subset match)
+    if request.sample:
+        target = request.sample
+        def matches(sample):
+            return all(sample.get(k) == v for k, v in target.items())
+        new_samples = []
+        removed = False
+        for s in samples:
+            if not removed and matches(s):
+                removed = True
+                continue
+            new_samples.append(s)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Sample not found in ledger")
+        db_ledger.samples = new_samples
+        await db.commit()
+        return {"message": "Sample deleted successfully."}
+
+    raise HTTPException(status_code=400, detail="No sample specified for deletion")
+
+
+# --- SELF-LEARNING LEDGER ENDPOINTS ---
+
+def safe_get_sample_fields(sample):
+    """Safely extracts narration, amount, and type from a sample, handling malformed data."""
+    if not isinstance(sample, dict):
+        return None, None, None, ''
+    
+    # Try to get narration with various key formats
+    narration = (sample.get('narration') or 
+                sample.get('Narration') or 
+                sample.get('"narration') or  # Handle malformed key with quote
+                '')
+    
+    # If narration is missing, check if it's stored as a key (malformed data)
+    if not narration or narration.strip() in [':', ': ', '']:
+        for key in sample.keys():
+            # Check if key looks like a narration (long string, contains transaction details)
+            if isinstance(key, str) and len(key) > 20 and key not in ['amount', 'type', 'date', 'narration', 'Narration', '"narration', 'Credit', 'Debit']:
+                # This key is likely the narration text stored incorrectly as a key
+                narration = key.strip()
+                break
+    
+    # Try to get amount with various formats
+    amount_str = (sample.get('amount') or 
+                 sample.get('Amount') or 
+                 '0')
+    # Parse amount from strings like ": 504008, " or "504008"
+    if isinstance(amount_str, str):
+        # Extract number from string like ": 504008, "
+        numbers = re.findall(r'[\d,]+\.?\d*', amount_str)
+        if numbers:
+            amount_str = numbers[0]
+    try:
+        amount_val = float(str(amount_str).replace(',', ''))
+    except:
+        amount_val = 0.0
+    
+    # Try to get type with various formats
+    trans_type = (sample.get('type') or 
+                 sample.get('Type') or 
+                 '')
+    # Check if "Credit" or "Debit" are keys (malformed data)
+    if not trans_type:
+        if 'Credit' in sample:
+            trans_type = 'Credit'
+        elif 'Debit' in sample:
+            trans_type = 'Debit'
+    
+    # Get date
+    s_date = sample.get('date', '') or ''
+    
+    return narration, amount_val, trans_type, s_date
+
+@api_router.post("/clients/{client_id}/learn-ledgers")
+async def learn_ledgers_from_statements(client_id: str, request: LearnLedgersRequest, db: AsyncSession = Depends(database.get_db)):
+    """
+    Streams the learning process from processed statements in real-time.
+    Returns a JSON lines stream showing each transaction being processed.
+    Does NOT commit to database - results must be accepted via accept-learned-ledgers endpoint.
+    """
+    
+    async def generate_learning_stream():
+        delay_seconds = request.delay_ms / 1000.0
+        
+        # Load existing ledgers for this client to track which are new vs existing
+        existing_ledgers_query = select(models.KnownLedger).where(models.KnownLedger.client_id == client_id)
+        existing_result = await db.execute(existing_ledgers_query)
+        existing_ledgers = {ledger.ledger_name: ledger for ledger in existing_result.scalars().all()}
+        
+        # Track learning results in memory
+        # Structure: {ledger_name: {is_new: bool, samples: [...], existing_sample_count: int}}
+        learning_results = {}
+        
+        # Process each statement
+        for stmt_index, statement_id in enumerate(request.statement_ids):
+            statement = await db.get(models.BankStatement, statement_id)
+            if not statement or statement.client_id != client_id:
+                continue
+            
+            processed_data = statement.processed_data or []
+            total_transactions = len(processed_data)
+            
+            # Emit statement_start event
+            yield json.dumps({
+                "type": "statement_start",
+                "statement_id": statement_id,
+                "filename": statement.filename,
+                "total_transactions": total_transactions,
+                "statement_index": stmt_index,
+                "total_statements": len(request.statement_ids)
+            }) + "\n"
+            
+            # Process each transaction
+            for tx_index, transaction in enumerate(processed_data):
+                ledger_name = transaction.get("matched_ledger", "").strip()
+                narration = transaction.get("Narration", "").strip()
+                
+                # Skip Suspense transactions - they have no learning value
+                if not ledger_name or ledger_name.lower() == "suspense" or not narration:
+                    continue
+                
+                # Determine amount and type
+                amount = 0.0
+                try:
+                    amount_val = transaction.get("Amount") or transaction.get("Amount (INR)") or 0
+                    amount = float(str(amount_val).replace(",", ""))
+                except:
+                    amount = 0.0
+                
+                cr_dr = str(transaction.get("CR/DR", "")).strip().upper()
+                trans_type = "Credit" if cr_dr.startswith("CR") else "Debit"
+                
+                # Extract date from transaction (format: DD/MM/YYYY)
+                tx_date = ""
+                raw_date = transaction.get("Date", "")
+                if raw_date:
+                    # Extract just the date part (before any time component)
+                    tx_date = str(raw_date).split(' ')[0].strip()
+                
+                # Create sample object with date
+                sample = {
+                    "narration": narration,
+                    "amount": round(amount, 2),  # Round for consistency
+                    "type": trans_type,
+                    "date": tx_date,
+                    "user_confirmed": transaction.get("user_confirmed", False)
+                }
+                
+                # Check if this ledger is new or existing
+                is_new_ledger = ledger_name not in existing_ledgers and ledger_name not in learning_results
+                
+                # Initialize ledger in learning results if needed
+                if ledger_name not in learning_results:
+                    existing_ledger = existing_ledgers.get(ledger_name)
+                    learning_results[ledger_name] = {
+                        "is_new": ledger_name not in existing_ledgers,
+                        "samples": [],
+                        "existing_sample_count": len(existing_ledger.samples) if existing_ledger else 0,
+                        "is_active": existing_ledger.is_active if existing_ledger else True
+                    }
+                
+                # Create fingerprint for deduplication (round amount and include date)
+                fingerprint = f"{narration}|{round(amount, 2)}|{trans_type}|{tx_date}"
+                
+                # Check if sample already exists (in existing ledger or in learning results)
+                existing_fingerprints = set()
+                if ledger_name in existing_ledgers:
+                    for s in existing_ledgers[ledger_name].samples:
+                        s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+                        # Skip malformed samples that couldn't be parsed
+                        if s_narration is None or not s_narration:
+                            continue
+                        existing_fingerprints.add(f"{s_narration}|{round(float(s_amount), 2)}|{s_type}|{s_date}")
+                
+                for s in learning_results[ledger_name]["samples"]:
+                    s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+                    # Skip malformed samples
+                    if s_narration is None or not s_narration:
+                        continue
+                    existing_fingerprints.add(f"{s_narration}|{round(float(s_amount), 2)}|{s_type}|{s_date}")
+                
+                # Only add if not a duplicate
+                if fingerprint not in existing_fingerprints:
+                    learning_results[ledger_name]["samples"].append(sample)
+                
+                # Emit transaction event
+                yield json.dumps({
+                    "type": "transaction",
+                    "narration": narration[:100] + "..." if len(narration) > 100 else narration,
+                    "ledger_name": ledger_name,
+                    "amount": amount,
+                    "trans_type": trans_type,
+                    "transaction_index": tx_index,
+                    "total_transactions": total_transactions,
+                    "statement_index": stmt_index
+                }) + "\n"
+                
+                # Emit ledger update event
+                total_samples = learning_results[ledger_name]["existing_sample_count"] + len(learning_results[ledger_name]["samples"])
+                yield json.dumps({
+                    "type": "ledger_update",
+                    "ledger_name": ledger_name,
+                    "new_sample_count": len(learning_results[ledger_name]["samples"]),
+                    "total_samples": total_samples,
+                    "is_new": learning_results[ledger_name]["is_new"]
+                }) + "\n"
+                
+                # Delay for visualization
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+        
+        # Build final summary
+        new_ledgers = [name for name, data in learning_results.items() if data["is_new"]]
+        updated_ledgers = [name for name, data in learning_results.items() if not data["is_new"] and len(data["samples"]) > 0]
+        total_new_samples = sum(len(data["samples"]) for data in learning_results.values())
+        
+        # Emit completion event with full results
+        yield json.dumps({
+            "type": "complete",
+            "results": {
+                "ledgers_found": len(learning_results),
+                "new_ledgers": new_ledgers,
+                "updated_ledgers": updated_ledgers,
+                "total_new_samples": total_new_samples,
+                "learning_data": {
+                    name: {
+                        "is_new": data["is_new"],
+                        "new_sample_count": len(data["samples"]),
+                        "existing_sample_count": data["existing_sample_count"],
+                        "total_samples": data["existing_sample_count"] + len(data["samples"]),
+                        "samples": data["samples"]  # Include samples for acceptance
+                    }
+                    for name, data in learning_results.items()
+                }
+            }
+        }) + "\n"
+    
+    return StreamingResponse(
+        generate_learning_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+@api_router.post("/clients/{client_id}/accept-learned-ledgers")
+async def accept_learned_ledgers(client_id: str, request: AcceptLearnedLedgersRequest, db: AsyncSession = Depends(database.get_db)):
+    """
+    Accepts or rejects learned ledgers from a learning session.
+    Accepted ledgers are committed to the database.
+    Rejected ledgers (if new) are not created; (if existing) their new samples are discarded.
+    """
+    learning_data = request.learning_results.get("learning_data", {})
+    
+    accepted_count = 0
+    rejected_count = 0
+    samples_added = 0
+    
+    MAX_SAMPLES_PER_LEDGER = 25000
+    
+    for ledger_name in request.accepted_ledgers:
+        if ledger_name not in learning_data:
+            continue
+        
+        ledger_info = learning_data[ledger_name]
+        new_samples = ledger_info.get("samples", [])
+        
+        if not new_samples:
+            continue
+        
+        # Check if ledger exists
+        query = select(models.KnownLedger).where(
+            (models.KnownLedger.client_id == client_id) &
+            (models.KnownLedger.ledger_name == ledger_name)
+        )
+        result = await db.execute(query)
+        db_ledger = result.scalar_one_or_none()
+        
+        if db_ledger:
+            # Merge samples (deduplicate) - use rounded amounts and include date
+            existing_fingerprints = set()
+            for s in db_ledger.samples:
+                s_narration, s_amount, s_type, s_date = safe_get_sample_fields(s)
+                if s_narration is None or not s_narration:
+                    continue
+                existing_fingerprints.add(f"{s_narration}|{round(float(s_amount), 2)}|{s_type}|{s_date}")
+            
+            unique_new_samples = []
+            for sample in new_samples:
+                # Include date in clean_sample, remove user_confirmed flag
+                sample_date = sample.get("date", "") or ""
+                clean_sample = {
+                    "narration": sample["narration"],
+                    "amount": round(float(sample["amount"]), 2),
+                    "type": sample["type"],
+                    "date": sample_date
+                }
+                fingerprint = f"{clean_sample['narration']}|{clean_sample['amount']}|{clean_sample['type']}|{sample_date}"
+                if fingerprint not in existing_fingerprints:
+                    unique_new_samples.append(clean_sample)
+                    existing_fingerprints.add(fingerprint)
+            
+            combined_samples = db_ledger.samples + unique_new_samples
+            if len(combined_samples) > MAX_SAMPLES_PER_LEDGER:
+                combined_samples = combined_samples[-MAX_SAMPLES_PER_LEDGER:]
+            
+            db_ledger.samples = combined_samples
+            samples_added += len(unique_new_samples)
+        else:
+            # Create new ledger - include date in samples
+            clean_samples = [{
+                "narration": s["narration"],
+                "amount": round(float(s["amount"]), 2),
+                "type": s["type"],
+                "date": s.get("date", "") or ""
+            } for s in new_samples]
+            
+            db_ledger = models.KnownLedger(
+                client_id=client_id,
+                ledger_name=ledger_name,
+                samples=clean_samples[:MAX_SAMPLES_PER_LEDGER],
+                is_active=True
+            )
+            db.add(db_ledger)
+            samples_added += len(clean_samples[:MAX_SAMPLES_PER_LEDGER])
+        
+        accepted_count += 1
+    
+    # Rejected ledgers - nothing to do since we didn't commit them yet
+    rejected_count = len(request.rejected_ledgers)
+    
     await db.commit()
+    
+    return {
+        "message": "Learning results processed successfully.",
+        "accepted_ledgers": accepted_count,
+        "rejected_ledgers": rejected_count,
+        "samples_added": samples_added
+    }
 
-    return {"message": "Sample deleted successfully."}
+
+@api_router.patch("/known-ledgers/{ledger_id}/toggle-active")
+async def toggle_ledger_active(ledger_id: str, request: ToggleLedgerActiveRequest, db: AsyncSession = Depends(database.get_db)):
+    """Toggles the is_active status of a known ledger."""
+    db_ledger = await db.get(models.KnownLedger, ledger_id)
+    if not db_ledger:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+    
+    db_ledger.is_active = request.is_active
+    await db.commit()
+    await db.refresh(db_ledger)
+    
+    return {
+        "id": db_ledger.id,
+        "ledger_name": db_ledger.ledger_name,
+        "is_active": db_ledger.is_active,
+        "message": f"Ledger {'activated' if request.is_active else 'deactivated'} successfully."
+    }
+
+
+@api_router.delete("/known-ledgers/{ledger_id}", status_code=204)
+async def delete_known_ledger(ledger_id: str, cascade_rules: bool = Query(True), db: AsyncSession = Depends(database.get_db)):
+    """
+    Deletes a known ledger by ID. Optionally cascades removal of ledger rules for the same client and ledger name.
+    """
+    db_ledger = await db.get(models.KnownLedger, ledger_id)
+    if not db_ledger:
+        raise HTTPException(status_code=404, detail="Ledger not found")
+
+    if cascade_rules:
+        await db.execute(
+            delete(models.LedgerRule).where(
+                models.LedgerRule.client_id == db_ledger.client_id,
+                models.LedgerRule.ledger_name == db_ledger.ledger_name,
+            )
+        )
+
+    await db.delete(db_ledger)
+    await db.commit()
+    return None
+
+
+# --- END OF SELF-LEARNING LEDGER ENDPOINTS ---
 
 # --- END OF NEW ENDPOINTS BLOCK ---
-#Include any new endpoints above this line
-# Include the router in the main app
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2075,3 +2907,17 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+# This entire block will only run if the APP_ENV environment variable is set to "production"
+if os.environ.get("APP_ENV") == "production":
+    
+    # Mount the static files directory for the built React app
+    app.mount("/static", StaticFiles(directory="build/static"), name="static")
+
+    @app.get("/{catchall:path}", response_class=FileResponse)
+    def read_root(catchall: str):
+        """
+        Catch-all route to serve the React index.html file for any non-API, non-static path.
+        This is essential for the React Router to handle client-side routing in production.
+        """
+        return "build/index.html"
+# --- END OF ADDITION ---

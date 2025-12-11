@@ -21,7 +21,20 @@ import { Progress } from './components/ui/progress';
 import { Separator } from './components/ui/separator';
 import { ScrollArea } from './components/ui/scroll-area';
 import { Switch } from './components/ui/switch';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './components/ui/collapsible';
 import { Textarea } from './components/ui/textarea';
+import { Checkbox } from './components/ui/checkbox';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './components/ui/alert-dialog';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table';
 import { toast } from 'sonner';
 import { 
   Upload, 
@@ -37,15 +50,24 @@ import {
   Trash2,
   Edit,
   Search,
+  List,
   Filter,
   RefreshCw,
-  ChevronRight,ChevronsUpDown, 
+  ChevronRight,
+  ChevronDown,
+  ChevronsUpDown, 
   AlertCircle,
   CheckCircle2,
   HelpCircle,
   ArrowUp,
   ArrowDown,
-  Zap
+  ArrowLeft,
+  Zap,
+  Sparkles,
+  Play,
+  Power,
+  PowerOff,
+  Loader2
 } from 'lucide-react';
 
 
@@ -184,7 +206,10 @@ const DownloadVoucherModal = ({ isOpen, onClose, data, statementId }) => {
 };
 // --- END OF REPLACEMENT ---
 
-const API = `${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api`;
+//const API = `${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/api`;
+//const API = '/api'; // This makes all API calls relative to the current host
+const API = `${process.env.REACT_APP_API_URL || ''}/api`;
+
 
 // In App.js
 
@@ -786,6 +811,13 @@ const ClientManagement = () => {
   const [editingClient, setEditingClient] = useState(null); // Will hold the client object being edited
   // --- END: New state for Edit Modal ---
 
+  // --- START: New state for Delete Modal ---
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [clientToDelete, setClientToDelete] = useState(null);
+  const [approvalCode, setApprovalCode] = useState('');
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  // --- END: New state for Delete Modal ---
+
   useEffect(() => {
     fetchClients();
   }, []);
@@ -843,6 +875,39 @@ const ClientManagement = () => {
     }
   };
 
+  // --- START: Delete Client Handlers ---
+  const handleOpenDeleteDialog = (client) => {
+    setClientToDelete(client);
+    setShowDeleteDialog(true);
+    setApprovalCode(''); // Reset approval code when opening dialog
+  };
+
+  const handleDeleteClient = async () => {
+    if (!clientToDelete) return;
+    
+    // Validate approval code
+    if (approvalCode !== 'rahulapproves') {
+      toast.error('Invalid approval code. Please contact the Labs team for approval.');
+      return;
+    }
+
+    setDeleteLoading(true);
+    try {
+      await axios.delete(`${API}/clients/${clientToDelete.id}`);
+      toast.success(`Client "${clientToDelete.name}" deleted successfully!`);
+      setShowDeleteDialog(false);
+      setClientToDelete(null);
+      setApprovalCode('');
+      fetchClients(); // Refresh list
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || 'Failed to delete client';
+      toast.error(errorMessage);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+  // --- END: Delete Client Handlers ---
+
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
@@ -871,6 +936,14 @@ const ClientManagement = () => {
                 <p>Patterns: <span className="font-bold">{client.ledger_rule_count}</span></p>
                 <p>Statements: <span className="font-bold">{client.bank_statement_count}</span></p>
                 <p>Bank Accounts: <span className="font-bold">{client.bank_account_count}</span></p>
+                <p>Known Ledgers: <span className="font-bold">{client.known_ledger_count}</span></p>
+                <p>Latest Statement: {client.most_recent_statement_id ? (
+                  <Link to={`/statements/${client.most_recent_statement_id}`} className="font-bold text-blue-600 hover:underline">
+                    {client.most_recent_statement_month || 'N/A'}
+                  </Link>
+                ) : (
+                  <span className="font-bold">N/A</span>
+                )}</p>
               </div>
               <div className="flex gap-2 mt-4">
                 <Button variant="outline" size="sm" onClick={() => handleOpenEditModal(client)}>
@@ -883,6 +956,15 @@ const ClientManagement = () => {
                   View
                 </Button>
                 </Link>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={() => handleOpenDeleteDialog(client)}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                >
+                  <Trash2 className="w-4 h-4 mr-1" />
+                  Delete
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -963,6 +1045,83 @@ const ClientManagement = () => {
       </Dialog>
       {/* --- END: Add the new Edit Client Modal --- */}
 
+      {/* --- START: Delete Client Confirmation Dialog --- */}
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-red-600">Delete Client</DialogTitle>
+            <DialogDescription>
+              This is a critical action that cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+              <p className="text-sm text-red-800 font-semibold mb-2">
+                Warning: Deleting this client will permanently remove:
+              </p>
+              <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
+                <li>All bank accounts associated with this client</li>
+                <li>All ledger rules and patterns</li>
+                <li>All bank statements and transaction data</li>
+                <li>All known ledgers and classification feedback</li>
+              </ul>
+            </div>
+            <div>
+              <p className="text-sm text-slate-700 mb-2">
+                Client to be deleted: <span className="font-bold text-slate-900">{clientToDelete?.name}</span>
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="approval-code" className="text-slate-700">
+                Approval Code
+              </Label>
+              <Input
+                id="approval-code"
+                type="password"
+                value={approvalCode}
+                onChange={(e) => setApprovalCode(e.target.value)}
+                placeholder="Enter approval code"
+                className="mt-1"
+              />
+              <p className="text-xs text-slate-500 mt-2">
+                Please contact the Labs team to obtain approval before deleting a client from the database.
+              </p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-4 pt-4">
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setShowDeleteDialog(false);
+                setClientToDelete(null);
+                setApprovalCode('');
+              }}
+              disabled={deleteLoading}
+            >
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleDeleteClient} 
+              disabled={deleteLoading || approvalCode !== 'rahulapproves'}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deleteLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-4 h-4 mr-2" />
+                  Delete Client
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* --- END: Delete Client Confirmation Dialog --- */}
+
     </div>
   );
 };
@@ -974,6 +1133,7 @@ const ClientManagement = () => {
 // --- FIND AND REPLACE THE ENTIRE ClientDetailsPage COMPONENT ---
 const ClientDetailsPage = () => {
   const { clientId } = useParams();
+  const navigate = useNavigate();
   const [client, setClient] = useState(null);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [statements, setStatements] = useState([]);
@@ -987,11 +1147,21 @@ const ClientDetailsPage = () => {
 
   const [knownLedgers, setKnownLedgers] = useState([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [showLearnModal, setShowLearnModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [ledgersData, setLedgersData] = useState({ ledgers: [], total_pages: 1 });
   const [ledgersLoading, setLedgersLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // State for collapsible statement groups
+  const [expandedGroups, setExpandedGroups] = useState({
+    recent: true,
+    thisMonth: false,
+    lastMonth: false,
+    older: false
+  });
+  const [showAllRecent, setShowAllRecent] = useState(false);
 
   const fetchClientData = useCallback(async () => {
     // This part only fetches non-paginated data once
@@ -1011,13 +1181,14 @@ const ClientDetailsPage = () => {
   }, [clientId]);
 
   const fetchLedgers = useCallback(async (page, search) => {
-    // This function fetches the paginated ledgers
+    // This function fetches the paginated ledgers (including inactive for management)
     setLedgersLoading(true);
     try {
       const params = new URLSearchParams({
         page: page,
         limit: 12, // Display 12 items per page
         search: search || '',
+        include_inactive: 'true', // Show all ledgers in management view
       });
       const response = await axios.get(`${API}/clients/${clientId}/ledgers?${params.toString()}`);
       setLedgersData(response.data);
@@ -1091,6 +1262,16 @@ const ClientDetailsPage = () => {
   return (
     <div className="space-y-8">
       <div>
+        <div className="mb-4">
+          <Button 
+            variant="outline" 
+            onClick={() => navigate('/clients')}
+            className="mb-4"
+          >
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to All Clients
+          </Button>
+        </div>
         <h1 className="text-3xl font-bold text-slate-900">{client.name}</h1>
         <p className="text-slate-600 mt-2">Manage client statements, accounts, and ledger history.</p>
       </div>
@@ -1103,72 +1284,211 @@ const ClientDetailsPage = () => {
           <CardDescription>Review or delete processed statements for this client.</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
-            {statements.length > 0 ? (
-              statements.map(stmt => {
-  const isCompleted = stmt.status === "Completed";
+          {statements.length > 0 ? (
+            (() => {
+              // Group statements by date periods
+              const now = new Date();
+              const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+              const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+              const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+              const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
 
-  const getPercentageColor = (percentage) => {
-    const p = typeof percentage === 'number' ? percentage : 0;
-    if (p === 100) return "bg-green-100 text-green-800 border-green-200";
-    if (p >= 75) return "bg-teal-100 text-teal-800 border-teal-200";
-    if (p >= 40) return "bg-amber-100 text-amber-800 border-amber-200";
-    if (p > 0) return "bg-orange-100 text-orange-800 border-orange-200";
-    return "bg-red-100 text-red-800 border-red-200";
-  };
+              const groups = {
+                recent: [], // Last 30 days
+                thisMonth: [], // This month (excluding last 30 days if applicable)
+                lastMonth: [], // Last month
+                older: [] // Older than last month
+              };
 
-  return (
-    <div key={stmt.id} className="p-4 border rounded-lg bg-slate-50/50 flex flex-col gap-2">
-      {/* --- TOP ROW: Filename and Badges --- */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <p className="font-semibold text-slate-800 truncate">{stmt.filename}</p>
-          <Badge 
-            variant={isCompleted ? "default" : "outline"}
-            className={isCompleted 
-              ? "bg-green-100 text-green-800 border-green-200" 
-              : "border-amber-400 text-amber-700"}
-          >
-            {stmt.status}
-          </Badge>
-          <Badge variant="outline" className={getPercentageColor(stmt.completion_percentage)}>
-            {stmt.completion_percentage.toFixed(2)}%
-          </Badge>
-        </div>
-      </div>
+              statements.forEach(stmt => {
+                const uploadDate = new Date(stmt.upload_date);
+                
+                if (uploadDate >= thirtyDaysAgo) {
+                  groups.recent.push(stmt);
+                } else if (uploadDate >= startOfThisMonth) {
+                  groups.thisMonth.push(stmt);
+                } else if (uploadDate >= startOfLastMonth && uploadDate <= endOfLastMonth) {
+                  groups.lastMonth.push(stmt);
+                } else {
+                  groups.older.push(stmt);
+                }
+              });
 
-      {/* --- MIDDLE ROW (METADATA) --- */}
-      <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span>Uploaded: <span className="font-medium text-slate-600">{new Date(stmt.upload_date).toLocaleDateString()}</span></span>
-        {stmt.bank_ledger_name && <span className="text-slate-300">|</span>}
-        {stmt.bank_ledger_name && <span>Account: <span className="font-medium text-slate-600">{stmt.bank_ledger_name}</span></span>}
-        {stmt.statement_period && <span className="text-slate-300">|</span>}
-        {stmt.statement_period && <span>Period: <span className="font-medium text-slate-600">{stmt.statement_period}</span></span>}
-        <span className="text-slate-300">|</span>
-        <span>Matched: <span className="font-medium text-slate-600">{stmt.matched_transactions} / {stmt.total_transactions}</span></span>
-      </div>
-      
-      {/* --- BOTTOM ROW (PROGRESS BAR & ACTIONS) --- */}
-      <div className="flex items-center gap-4 mt-1">
-        <Progress value={stmt.completion_percentage} className="h-2" />
-        <div className="flex gap-2 flex-shrink-0">
-          <Link to={`/statements/${stmt.id}`}>
-            <Button variant="outline" size="sm" className="h-8">
-              <Eye className="w-4 h-4 mr-1" /> View
-            </Button>
-          </Link>
-          <Button variant="destructive" size="sm" className="h-8" onClick={() => setStatementToDelete(stmt)}>
-            <Trash2 className="w-4 h-4 mr-1" /> Delete
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-})
-            ) : (
-              <p className="text-center text-slate-500 py-4">No statements have been processed for this client yet.</p>
-            )}
-          </div>
+              const getPercentageColor = (percentage) => {
+                const p = typeof percentage === 'number' ? percentage : 0;
+                if (p === 100) return "bg-green-100 text-green-800 border-green-200";
+                if (p >= 75) return "bg-teal-100 text-teal-800 border-teal-200";
+                if (p >= 40) return "bg-amber-100 text-amber-800 border-amber-200";
+                if (p > 0) return "bg-orange-100 text-orange-800 border-orange-200";
+                return "bg-red-100 text-red-800 border-red-200";
+              };
+
+              const renderStatement = (stmt) => {
+                const isCompleted = stmt.status === "Completed";
+
+                return (
+                  <div key={stmt.id} className="p-4 border rounded-lg bg-slate-50/50 flex flex-col gap-2">
+                    {/* --- TOP ROW: Filename and Badges --- */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <p className="font-semibold text-slate-800 truncate">{stmt.filename}</p>
+                        <Badge 
+                          variant={isCompleted ? "default" : "outline"}
+                          className={isCompleted 
+                            ? "bg-green-100 text-green-800 border-green-200" 
+                            : "border-amber-400 text-amber-700"}
+                        >
+                          {stmt.status}
+                        </Badge>
+                        <Badge variant="outline" className={getPercentageColor(stmt.completion_percentage)}>
+                          {stmt.completion_percentage.toFixed(2)}%
+                        </Badge>
+                      </div>
+                    </div>
+
+                    {/* --- MIDDLE ROW (METADATA) --- */}
+                    <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span>Uploaded: <span className="font-medium text-slate-600">{new Date(stmt.upload_date).toLocaleDateString()}</span></span>
+                      {stmt.bank_ledger_name && <span className="text-slate-300">|</span>}
+                      {stmt.bank_ledger_name && <span>Account: <span className="font-medium text-slate-600">{stmt.bank_ledger_name}</span></span>}
+                      {stmt.statement_period && <span className="text-slate-300">|</span>}
+                      {stmt.statement_period && <span>Period: <span className="font-medium text-slate-600">{stmt.statement_period}</span></span>}
+                      <span className="text-slate-300">|</span>
+                      <span>Matched: <span className="font-medium text-slate-600">{stmt.matched_transactions} / {stmt.total_transactions}</span></span>
+                    </div>
+                    
+                    {/* --- BOTTOM ROW (PROGRESS BAR & ACTIONS) --- */}
+                    <div className="flex items-center gap-4 mt-1">
+                      <Progress value={stmt.completion_percentage} className="h-2" />
+                      <div className="flex gap-2 flex-shrink-0">
+                        <Link to={`/statements/${stmt.id}`}>
+                          <Button variant="outline" size="sm" className="h-8">
+                            <Eye className="w-4 h-4 mr-1" /> View
+                          </Button>
+                        </Link>
+                        <Button variant="destructive" size="sm" className="h-8" onClick={() => setStatementToDelete(stmt)}>
+                          <Trash2 className="w-4 h-4 mr-1" /> Delete
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              };
+
+              const recentToShow = showAllRecent ? groups.recent : groups.recent.slice(0, 5);
+              const hasMoreRecent = groups.recent.length > 5;
+
+              return (
+                <div className="space-y-4">
+                  {/* Recent (Last 30 days) - Always expanded, limit to 5 */}
+                  {groups.recent.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-lg font-semibold text-slate-800">
+                          Recent ({groups.recent.length})
+                        </h3>
+                      </div>
+                      <div className="space-y-3">
+                        {recentToShow.map(renderStatement)}
+                        {hasMoreRecent && !showAllRecent && (
+                          <div className="flex justify-center pt-2">
+                            <Button 
+                              variant="ghost" 
+                              size="sm"
+                              onClick={() => setShowAllRecent(true)}
+                              className="text-slate-600"
+                            >
+                              Show {groups.recent.length - 5} more recent statements
+                            </Button>
+                          </div>
+                        )}
+                        {showAllRecent && hasMoreRecent && (
+                          <div className="flex justify-center pt-2">
+                            <Button 
+                              variant="ghost" 
+                              size="sm"
+                              onClick={() => setShowAllRecent(false)}
+                              className="text-slate-600"
+                            >
+                              Show less
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* This Month - Collapsible */}
+                  {groups.thisMonth.length > 0 && (
+                    <Collapsible
+                      open={expandedGroups.thisMonth}
+                      onOpenChange={(open) => setExpandedGroups(prev => ({ ...prev, thisMonth: open }))}
+                    >
+                      <CollapsibleTrigger className="flex items-center justify-between w-full p-3 rounded-lg border bg-slate-50 hover:bg-slate-100 transition-colors">
+                        <h3 className="text-lg font-semibold text-slate-800">
+                          This Month ({groups.thisMonth.length})
+                        </h3>
+                        <ChevronDown 
+                          className={`w-5 h-5 text-slate-600 transition-transform ${
+                            expandedGroups.thisMonth ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="space-y-3 mt-3">
+                        {groups.thisMonth.map(renderStatement)}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )}
+
+                  {/* Last Month - Collapsible */}
+                  {groups.lastMonth.length > 0 && (
+                    <Collapsible
+                      open={expandedGroups.lastMonth}
+                      onOpenChange={(open) => setExpandedGroups(prev => ({ ...prev, lastMonth: open }))}
+                    >
+                      <CollapsibleTrigger className="flex items-center justify-between w-full p-3 rounded-lg border bg-slate-50 hover:bg-slate-100 transition-colors">
+                        <h3 className="text-lg font-semibold text-slate-800">
+                          Last Month ({groups.lastMonth.length})
+                        </h3>
+                        <ChevronDown 
+                          className={`w-5 h-5 text-slate-600 transition-transform ${
+                            expandedGroups.lastMonth ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="space-y-3 mt-3">
+                        {groups.lastMonth.map(renderStatement)}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )}
+
+                  {/* Older - Collapsible */}
+                  {groups.older.length > 0 && (
+                    <Collapsible
+                      open={expandedGroups.older}
+                      onOpenChange={(open) => setExpandedGroups(prev => ({ ...prev, older: open }))}
+                    >
+                      <CollapsibleTrigger className="flex items-center justify-between w-full p-3 rounded-lg border bg-slate-50 hover:bg-slate-100 transition-colors">
+                        <h3 className="text-lg font-semibold text-slate-800">
+                          Older ({groups.older.length})
+                        </h3>
+                        <ChevronDown 
+                          className={`w-5 h-5 text-slate-600 transition-transform ${
+                            expandedGroups.older ? 'rotate-180' : ''
+                          }`}
+                        />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="space-y-3 mt-3">
+                        {groups.older.map(renderStatement)}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )}
+                </div>
+              );
+            })()
+          ) : (
+            <p className="text-center text-slate-500 py-4">No statements have been processed for this client yet.</p>
+          )}
         </CardContent>
       </Card>
 
@@ -1193,9 +1513,19 @@ const ClientDetailsPage = () => {
                 }}
               />
             </div>
-            <Button onClick={() => setShowUploadModal(true)}>
-              <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
-            </Button>
+            <div className="flex gap-2">
+              <Link to={`/clients/${clientId}/ledgers/manage`}>
+                <Button variant="secondary">
+                  <List className="w-4 h-4 mr-2" /> Review Known Ledgers
+                </Button>
+              </Link>
+              <Button variant="outline" onClick={() => setShowLearnModal(true)}>
+                <Sparkles className="w-4 h-4 mr-2" /> Learn from Statements
+              </Button>
+              <Button onClick={() => setShowUploadModal(true)}>
+                <Upload className="w-4 h-4 mr-2" /> Upload Tally Day Book
+              </Button>
+            </div>
           </div>
 
           {/* New Grid Layout */}
@@ -1204,24 +1534,83 @@ const ClientDetailsPage = () => {
           ) : ledgersData.ledgers.length > 0 ? (
             <>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {ledgersData.ledgers.map(ledger => (
-                  <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} key={ledger.id}>
-                    <div className="p-4 border rounded-lg hover:bg-slate-50 hover:shadow-md transition-all h-full">
-                      <p className="font-semibold text-slate-800 truncate" title={ledger.ledger_name}>{ledger.ledger_name}</p>
-                      <div className="flex items-center justify-between mt-2 text-sm text-slate-600">
-                        <span>
-                          {ledger.rule_count > 0 ? (
-                            <CheckCircle2 className="w-4 h-4 inline mr-1 text-green-500" />
-                          ) : (
-                            <AlertCircle className="w-4 h-4 inline mr-1 text-amber-500" />
-                          )}
-                          {ledger.rule_count} rule(s)
-                        </span>
-                        <span>{ledger.sample_count} sample(s)</span>
+                {ledgersData.ledgers.map(ledger => {
+                  // Check if this is a rule-only ledger (no KnownLedger record)
+                  const isRuleOnly = ledger.id.startsWith('rule_');
+                  
+                  return (
+                    <div key={ledger.id} className={`p-4 border rounded-lg transition-all h-full ${ledger.is_active === false ? 'opacity-50 bg-slate-100' : 'hover:bg-slate-50 hover:shadow-md'}`}>
+                      <div className="flex items-start justify-between gap-2">
+                        {isRuleOnly ? (
+                          <p className="font-semibold text-slate-800 truncate flex-1 min-w-0" title={ledger.ledger_name}>{ledger.ledger_name}</p>
+                        ) : (
+                          <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} className="flex-1 min-w-0">
+                            <p className="font-semibold text-slate-800 truncate" title={ledger.ledger_name}>{ledger.ledger_name}</p>
+                          </Link>
+                        )}
+                        {!isRuleOnly && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 flex-shrink-0"
+                            title={ledger.is_active === false ? 'Activate ledger' : 'Deactivate ledger'}
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              try {
+                                await axios.patch(`${API}/known-ledgers/${ledger.id}/toggle-active`, {
+                                  is_active: ledger.is_active === false ? true : false
+                                });
+                                toast.success(`Ledger ${ledger.is_active === false ? 'activated' : 'deactivated'}.`);
+                                fetchLedgers(currentPage, searchQuery);
+                              } catch (error) {
+                                toast.error("Failed to update ledger status.");
+                              }
+                            }}
+                          >
+                            {ledger.is_active === false ? (
+                              <Power className="w-4 h-4 text-green-600" />
+                            ) : (
+                              <PowerOff className="w-4 h-4 text-slate-400 hover:text-red-500" />
+                            )}
+                          </Button>
+                        )}
                       </div>
+                      {isRuleOnly ? (
+                        <div>
+                          <div className="flex items-center justify-between mt-2 text-sm text-slate-600">
+                            <span>
+                              {ledger.rule_count > 0 ? (
+                                <CheckCircle2 className="w-4 h-4 inline mr-1 text-green-500" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 inline mr-1 text-amber-500" />
+                              )}
+                              {ledger.rule_count} rule(s)
+                            </span>
+                            <span>{ledger.sample_count} sample(s)</span>
+                          </div>
+                          <Badge variant="outline" className="mt-2 text-xs">Rules Only</Badge>
+                        </div>
+                      ) : (
+                        <Link to={`/clients/${clientId}/ledgers/${ledger.id}`}>
+                          <div className="flex items-center justify-between mt-2 text-sm text-slate-600">
+                            <span>
+                              {ledger.rule_count > 0 ? (
+                                <CheckCircle2 className="w-4 h-4 inline mr-1 text-green-500" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 inline mr-1 text-amber-500" />
+                              )}
+                              {ledger.rule_count} rule(s)
+                            </span>
+                            <span>{ledger.sample_count} sample(s)</span>
+                          </div>
+                          {ledger.is_active === false && (
+                            <Badge variant="secondary" className="mt-2 text-xs">Inactive</Badge>
+                          )}
+                        </Link>
+                      )}
                     </div>
-                  </Link>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Pagination Controls */}
@@ -1296,7 +1685,19 @@ const ClientDetailsPage = () => {
         clientId={clientId}
         onSuccess={() => {
             setShowUploadModal(false);
-            fetchData(); // Re-fetch all data to update the summary list
+            fetchLedgers(currentPage, searchQuery);
+        }}
+      />
+      
+      {/* Learn Ledgers Modal */}
+      <LearnLedgersModal
+        isOpen={showLearnModal}
+        onClose={() => setShowLearnModal(false)}
+        clientId={clientId}
+        statements={statements}
+        onSuccess={() => {
+            setShowLearnModal(false);
+            fetchLedgers(currentPage, searchQuery);
         }}
       />
 
@@ -1451,6 +1852,517 @@ const TallyUploadModal = ({ isOpen, onClose, clientId, onSuccess }) => {
   );
 };
 // --- END OF NEW MODAL COMPONENT ---
+
+// --- LEARN LEDGERS MODAL COMPONENT ---
+const LearnLedgersModal = ({ isOpen, onClose, clientId, statements, onSuccess }) => {
+  // Phase: 'selection' | 'processing' | 'complete' | 'review'
+  const [phase, setPhase] = useState('selection');
+  const [selectedStatements, setSelectedStatements] = useState(new Set());
+  const [delayMs, setDelayMs] = useState(50);
+  
+  // Processing state
+  const [currentStatement, setCurrentStatement] = useState(null);
+  const [currentTransaction, setCurrentTransaction] = useState(null);
+  const [progressInfo, setProgressInfo] = useState({ statement: 0, total: 0, tx: 0, txTotal: 0 });
+  const [ledgerBubbles, setLedgerBubbles] = useState({}); // {ledger_name: {count, isNew}}
+  
+  // Review state
+  const [learningResults, setLearningResults] = useState(null);
+  const [selectedLedgersForAccept, setSelectedLedgersForAccept] = useState(new Set());
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  
+  // Reset state when modal closes
+  const handleClose = () => {
+    setPhase('selection');
+    setSelectedStatements(new Set());
+    setCurrentStatement(null);
+    setCurrentTransaction(null);
+    setProgressInfo({ statement: 0, total: 0, tx: 0, txTotal: 0 });
+    setLedgerBubbles({});
+    setLearningResults(null);
+    setSelectedLedgersForAccept(new Set());
+    onClose();
+  };
+  
+  const toggleStatement = (stmtId) => {
+    setSelectedStatements(prev => {
+      const next = new Set(prev);
+      if (next.has(stmtId)) {
+        next.delete(stmtId);
+      } else {
+        next.add(stmtId);
+      }
+      return next;
+    });
+  };
+  
+  const selectAllStatements = () => {
+    setSelectedStatements(new Set(statements.map(s => s.id)));
+  };
+  
+  const deselectAllStatements = () => {
+    setSelectedStatements(new Set());
+  };
+  
+  const startLearning = async () => {
+    if (selectedStatements.size === 0) {
+      toast.error("Please select at least one statement.");
+      return;
+    }
+    
+    setPhase('processing');
+    setLedgerBubbles({});
+    
+    try {
+      const response = await fetch(`${API}/clients/${clientId}/learn-ledgers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          statement_ids: Array.from(selectedStatements),
+          delay_ms: delayMs
+        })
+      });
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          
+          try {
+            const event = JSON.parse(line);
+            
+            switch (event.type) {
+              case 'statement_start':
+                setCurrentStatement(event.filename);
+                setProgressInfo(prev => ({
+                  ...prev,
+                  statement: event.statement_index + 1,
+                  total: event.total_statements,
+                  txTotal: event.total_transactions,
+                  tx: 0
+                }));
+                break;
+                
+              case 'transaction':
+                setCurrentTransaction({
+                  narration: event.narration,
+                  ledger: event.ledger_name,
+                  amount: event.amount,
+                  type: event.trans_type
+                });
+                setProgressInfo(prev => ({
+                  ...prev,
+                  tx: event.transaction_index + 1
+                }));
+                break;
+                
+              case 'ledger_update':
+                setLedgerBubbles(prev => ({
+                  ...prev,
+                  [event.ledger_name]: {
+                    count: event.new_sample_count,
+                    totalCount: event.total_samples,
+                    isNew: event.is_new
+                  }
+                }));
+                break;
+                
+              case 'complete':
+                setLearningResults(event.results);
+                // Pre-select all ledgers for acceptance
+                const allLedgerNames = Object.keys(event.results.learning_data || {});
+                setSelectedLedgersForAccept(new Set(allLedgerNames));
+                setPhase('complete'); // Go to completion summary first, not directly to review
+                break;
+            }
+          } catch (e) {
+            console.error('Failed to parse event:', line, e);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Learning stream error:', error);
+      toast.error("Failed to run learning process.");
+      setPhase('selection');
+    }
+  };
+  
+  const toggleLedgerSelection = (ledgerName) => {
+    setSelectedLedgersForAccept(prev => {
+      const next = new Set(prev);
+      if (next.has(ledgerName)) {
+        next.delete(ledgerName);
+      } else {
+        next.add(ledgerName);
+      }
+      return next;
+    });
+  };
+  
+  const selectAllLedgers = () => {
+    const allNames = Object.keys(learningResults?.learning_data || {});
+    setSelectedLedgersForAccept(new Set(allNames));
+  };
+  
+  const deselectAllLedgers = () => {
+    setSelectedLedgersForAccept(new Set());
+  };
+  
+  const handleAcceptReject = async () => {
+    if (!learningResults) return;
+    
+    setIsSubmitting(true);
+    const allLedgerNames = Object.keys(learningResults.learning_data || {});
+    const accepted = Array.from(selectedLedgersForAccept);
+    const rejected = allLedgerNames.filter(name => !selectedLedgersForAccept.has(name));
+    
+    try {
+      await axios.post(`${API}/clients/${clientId}/accept-learned-ledgers`, {
+        accepted_ledgers: accepted,
+        rejected_ledgers: rejected,
+        learning_results: learningResults
+      });
+      
+      toast.success(`Accepted ${accepted.length} ledger(s), rejected ${rejected.length} ledger(s).`);
+      onSuccess();
+      handleClose();
+    } catch (error) {
+      toast.error("Failed to save learning results.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+  
+  if (!isOpen) return null;
+  
+  return (
+    <Dialog open={isOpen} onOpenChange={handleClose}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-amber-500" />
+            {phase === 'selection' && 'Learn Ledgers from Statements'}
+            {phase === 'processing' && 'Learning in Progress...'}
+            {phase === 'complete' && 'Learning Complete!'}
+            {phase === 'review' && 'Review Discovered Ledgers'}
+          </DialogTitle>
+          <DialogDescription>
+            {phase === 'selection' && 'Select the processed statements to analyze for ledger names and sample narrations.'}
+            {phase === 'processing' && 'Watching the system learn from your classified transactions.'}
+            {phase === 'complete' && 'The learning process has finished. Review the summary below.'}
+            {phase === 'review' && 'Review and accept or reject the discovered ledgers before saving.'}
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="flex-1 overflow-auto py-4">
+          {/* PHASE 1: Statement Selection */}
+          {phase === 'selection' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={selectAllStatements}>Select All</Button>
+                  <Button variant="outline" size="sm" onClick={deselectAllStatements}>Deselect All</Button>
+                </div>
+                <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <Label>Visualization Delay:</Label>
+                  <Select value={delayMs.toString()} onValueChange={(v) => setDelayMs(parseInt(v))}>
+                    <SelectTrigger className="w-24">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="0">None</SelectItem>
+                      <SelectItem value="25">25ms</SelectItem>
+                      <SelectItem value="50">50ms</SelectItem>
+                      <SelectItem value="100">100ms</SelectItem>
+                      <SelectItem value="200">200ms</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              
+              <div className="border rounded-lg divide-y max-h-80 overflow-auto">
+                {statements.length > 0 ? statements.map(stmt => (
+                  <div 
+                    key={stmt.id}
+                    className={`p-3 flex items-center gap-3 cursor-pointer hover:bg-slate-50 ${selectedStatements.has(stmt.id) ? 'bg-blue-50' : ''}`}
+                    onClick={() => toggleStatement(stmt.id)}
+                  >
+                    <input 
+                      type="checkbox" 
+                      checked={selectedStatements.has(stmt.id)}
+                      onChange={() => {}}
+                      className="w-4 h-4"
+                    />
+                    <div className="flex-1">
+                      <p className="font-medium text-sm">{stmt.filename}</p>
+                      <p className="text-xs text-slate-500">
+                        {stmt.total_transactions} transactions • {new Date(stmt.upload_date).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <Badge variant={stmt.status === 'Completed' ? 'default' : 'secondary'}>
+                      {Math.round(stmt.completion_percentage)}%
+                    </Badge>
+                  </div>
+                )) : (
+                  <p className="p-4 text-center text-slate-500">No processed statements available.</p>
+                )}
+              </div>
+              
+              <p className="text-sm text-slate-600">
+                {selectedStatements.size} statement(s) selected
+              </p>
+            </div>
+          )}
+          
+          {/* PHASE 2: Processing Visualization */}
+          {phase === 'processing' && (
+            <div className="space-y-6">
+              {/* Progress Header */}
+              <div className="bg-slate-50 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium">
+                    Statement {progressInfo.statement} of {progressInfo.total}
+                  </span>
+                  <span className="text-sm text-slate-600">{currentStatement}</span>
+                </div>
+                <Progress value={progressInfo.txTotal > 0 ? (progressInfo.tx / progressInfo.txTotal) * 100 : 0} className="h-2" />
+                <p className="text-xs text-slate-500 mt-1">
+                  Transaction {progressInfo.tx} of {progressInfo.txTotal}
+                </p>
+              </div>
+              
+              {/* Current Transaction */}
+              {currentTransaction && (
+                <div className="border rounded-lg p-4 bg-white">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-600 truncate">{currentTransaction.narration}</p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <Badge variant="outline" className="font-mono">
+                        ₹{currentTransaction.amount?.toLocaleString('en-IN')}
+                      </Badge>
+                      <Badge className={currentTransaction.type === 'Credit' ? 'bg-green-600' : 'bg-red-600'}>
+                        {currentTransaction.type}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <ArrowRight className="w-4 h-4 text-slate-400" />
+                    <Badge variant="secondary" className="text-sm">
+                      {currentTransaction.ledger}
+                    </Badge>
+                  </div>
+                </div>
+              )}
+              
+              {/* Ledger Bubbles */}
+              <div className="border rounded-lg p-4 min-h-48">
+                <p className="text-xs font-medium text-slate-500 mb-3">DISCOVERED LEDGERS</p>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(ledgerBubbles).map(([name, data]) => (
+                    <div 
+                      key={name}
+                      className={`px-3 py-2 rounded-full text-sm flex items-center gap-2 transition-all ${
+                        data.isNew 
+                          ? 'bg-green-100 text-green-800 border border-green-300' 
+                          : 'bg-blue-100 text-blue-800 border border-blue-300'
+                      }`}
+                    >
+                      <span className="truncate max-w-40" title={name}>{name}</span>
+                      <Badge variant="outline" className="text-xs">+{data.count}</Badge>
+                    </div>
+                  ))}
+                </div>
+                {Object.keys(ledgerBubbles).length === 0 && (
+                  <p className="text-center text-slate-400 py-8">Ledgers will appear here as they are discovered...</p>
+                )}
+              </div>
+            </div>
+          )}
+          
+          {/* PHASE 2.5: Learning Complete Summary */}
+          {phase === 'complete' && learningResults && (
+            <div className="space-y-6">
+              {/* Success Icon */}
+              <div className="text-center py-4">
+                <div className="w-16 h-16 mx-auto bg-green-100 rounded-full flex items-center justify-center mb-4">
+                  <CheckCircle2 className="w-10 h-10 text-green-600" />
+                </div>
+                <h3 className="text-xl font-semibold text-slate-800">Learning Complete!</h3>
+                <p className="text-slate-600 mt-1">Successfully analyzed all selected statements.</p>
+              </div>
+              
+              {/* Summary Stats */}
+              <div className="grid grid-cols-3 gap-4">
+                <div className="bg-green-50 rounded-lg p-4 text-center border border-green-200">
+                  <p className="text-3xl font-bold text-green-700">{learningResults.new_ledgers?.length || 0}</p>
+                  <p className="text-sm text-green-600 mt-1">New Ledgers</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-4 text-center border border-blue-200">
+                  <p className="text-3xl font-bold text-blue-700">{learningResults.updated_ledgers?.length || 0}</p>
+                  <p className="text-sm text-blue-600 mt-1">Updated Ledgers</p>
+                </div>
+                <div className="bg-amber-50 rounded-lg p-4 text-center border border-amber-200">
+                  <p className="text-3xl font-bold text-amber-700">{learningResults.total_new_samples || 0}</p>
+                  <p className="text-sm text-amber-600 mt-1">New Samples</p>
+                </div>
+              </div>
+              
+              {/* Discovered Ledgers Preview */}
+              <div className="border rounded-lg p-4">
+                <p className="text-xs font-medium text-slate-500 mb-3">DISCOVERED LEDGERS</p>
+                <div className="flex flex-wrap gap-2 max-h-40 overflow-auto">
+                  {Object.entries(ledgerBubbles).map(([name, data]) => (
+                    <div 
+                      key={name}
+                      className={`px-3 py-2 rounded-full text-sm flex items-center gap-2 ${
+                        data.isNew 
+                          ? 'bg-green-100 text-green-800 border border-green-300' 
+                          : 'bg-blue-100 text-blue-800 border border-blue-300'
+                      }`}
+                    >
+                      <span className="truncate max-w-40" title={name}>{name}</span>
+                      <Badge variant="outline" className="text-xs">+{data.count}</Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <p className="text-center text-sm text-slate-500">
+                Click "Review & Accept" to select which ledgers to save to your database.
+              </p>
+            </div>
+          )}
+          
+          {/* PHASE 3: Review & Accept/Reject */}
+          {phase === 'review' && learningResults && (
+            <div className="space-y-4">
+              {/* Summary Stats */}
+              <div className="grid grid-cols-3 gap-4">
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-green-700">{learningResults.new_ledgers?.length || 0}</p>
+                  <p className="text-xs text-green-600">New Ledgers</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-blue-700">{learningResults.updated_ledgers?.length || 0}</p>
+                  <p className="text-xs text-blue-600">Updated Ledgers</p>
+                </div>
+                <div className="bg-amber-50 rounded-lg p-3 text-center">
+                  <p className="text-2xl font-bold text-amber-700">{learningResults.total_new_samples || 0}</p>
+                  <p className="text-xs text-amber-600">New Samples</p>
+                </div>
+              </div>
+              
+              {/* Selection Controls */}
+              <div className="flex items-center justify-between">
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={selectAllLedgers}>Accept All</Button>
+                  <Button variant="outline" size="sm" onClick={deselectAllLedgers}>Reject All</Button>
+                </div>
+                <span className="text-sm text-slate-600">
+                  {selectedLedgersForAccept.size} of {Object.keys(learningResults.learning_data || {}).length} selected to accept
+                </span>
+              </div>
+              
+              {/* Ledger List */}
+              <div className="border rounded-lg divide-y max-h-64 overflow-auto">
+                {Object.entries(learningResults.learning_data || {}).map(([name, data]) => (
+                  <div 
+                    key={name}
+                    className={`p-3 flex items-center gap-3 cursor-pointer hover:bg-slate-50 ${
+                      selectedLedgersForAccept.has(name) ? 'bg-green-50' : 'bg-red-50'
+                    }`}
+                    onClick={() => toggleLedgerSelection(name)}
+                  >
+                    <input 
+                      type="checkbox" 
+                      checked={selectedLedgersForAccept.has(name)}
+                      onChange={() => {}}
+                      className="w-4 h-4"
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium text-sm">{name}</p>
+                        {data.is_new && <Badge className="bg-green-600 text-xs">New</Badge>}
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        +{data.new_sample_count} new samples
+                        {!data.is_new && ` (${data.existing_sample_count} existing → ${data.total_samples} total)`}
+                      </p>
+                    </div>
+                    <Badge variant={selectedLedgersForAccept.has(name) ? 'default' : 'destructive'}>
+                      {selectedLedgersForAccept.has(name) ? 'Accept' : 'Reject'}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        {/* Footer Actions */}
+        <div className="flex justify-end gap-4 pt-4 border-t">
+          {phase === 'selection' && (
+            <>
+              <Button variant="outline" onClick={handleClose}>Cancel</Button>
+              <Button onClick={startLearning} disabled={selectedStatements.size === 0}>
+                <Play className="w-4 h-4 mr-2" />
+                Start Learning
+              </Button>
+            </>
+          )}
+          {phase === 'processing' && (
+            <Button variant="outline" disabled>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Processing...
+            </Button>
+          )}
+          {phase === 'complete' && (
+            <>
+              <Button variant="outline" onClick={handleClose}>Cancel</Button>
+              <Button onClick={() => setPhase('review')}>
+                <ChevronRight className="w-4 h-4 mr-2" />
+                Review & Accept
+              </Button>
+            </>
+          )}
+          {phase === 'review' && (
+            <>
+              <Button variant="outline" onClick={handleClose}>Cancel</Button>
+              <Button onClick={handleAcceptReject} disabled={isSubmitting}>
+                {isSubmitting ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving...</>
+                ) : (
+                  <><Check className="w-4 h-4 mr-2" />Save Selected</>
+                )}
+              </Button>
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// Missing ArrowRight import - add inline component
+const ArrowRight = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
+  </svg>
+);
+
+// --- END OF LEARN LEDGERS MODAL ---
 
 // --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
 
@@ -1707,11 +2619,39 @@ const LedgerCombobox = ({ ledgers, value, onValueChange }) => {
   );
 };
 // --- END OF REPLACEMENT ---
+// --- ADD CONFIRMATION MODAL FOR NEW LEDGERS ---
+const AssignLedgerConfirmModal = ({ isOpen, onClose, ledgerName, transactionCount, onConfirm, onDecline, loading }) => {
+  if (!isOpen) return null;
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add new ledger?</DialogTitle>
+          <DialogDescription>
+            The ledger "{ledgerName}" is not in your known ledgers. Add it to the database and store {transactionCount} sample(s)?
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex justify-end gap-3 pt-4">
+          <Button variant="outline" onClick={onDecline} disabled={loading}>
+            No, assign one-off
+          </Button>
+          <Button onClick={onConfirm} disabled={loading}>
+            {loading ? 'Saving...' : 'Yes, add to known ledgers'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
 // --- REPLACE THE ENTIRE ClusterCard COMPONENT ---
-const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense, knownLedgers }) => {
+const ClusterCard = ({ cluster, clientId, statementId, onRuleCreated, otherNarrations, onDetach, onMarkAsSuspense, knownLedgers }) => {
   const [editableRegex, setEditableRegex] = useState(cluster.suggested_regex || '');
   const [ledgerName, setLedgerName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [assigning, setAssigning] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [pendingLedgerName, setPendingLedgerName] = useState('');
   const [validation, setValidation] = useState({ 
     matchStatus: 'none',
     matchCount: 0,
@@ -1851,6 +2791,50 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
       onRuleCreated();
     } catch (error) { toast.error("Failed to create rule."); } 
     finally { setLoading(false); }
+  };
+
+  const ledgerExists = (name) => (knownLedgers || []).some(l => l.toLowerCase() === name.toLowerCase());
+
+  const submitAssignment = async (addToKnownLedgers) => {
+    const name = ledgerName.trim();
+    if (!name) { toast.error("Ledger name is required."); return; }
+    if (!statementId) { toast.error("Missing statement id."); return; }
+
+    setAssigning(true);
+    try {
+      const payload = {
+        transactions: cluster.transactions.map(({ _tempId, ...rest }) => rest),
+        ledger_name: name,
+        add_to_known_ledgers: addToKnownLedgers
+      };
+      await axios.post(`${API}/statements/${statementId}/assign-cluster-to-ledger`, payload);
+      toast.success(`Assigned ${cluster.transactions.length} transaction(s) to "${name}".`);
+      setShowConfirmModal(false);
+      setPendingLedgerName('');
+      onRuleCreated();
+    } catch (error) {
+      toast.error("Failed to assign ledger.");
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  const handleAssignClick = () => {
+    const name = ledgerName.trim();
+    if (!name) { toast.error("Ledger name is required."); return; }
+
+    if (ledgerExists(name)) {
+      submitAssignment(false);
+    } else {
+      setPendingLedgerName(name);
+      setShowConfirmModal(true);
+    }
+  };
+
+  const handleConfirmAddLedger = () => submitAssignment(true);
+  const handleAssignOneOff = () => {
+    submitAssignment(false);
+    setShowConfirmModal(false);
   };
 
   const formatCurrency = (amount) => {
@@ -2010,7 +2994,19 @@ const ClusterCard = ({ cluster, clientId, onRuleCreated, otherNarrations, onDeta
         <Button onClick={handleCreateRule} disabled={loading || validation.matchStatus === 'none' || falsePositiveCount > 0 || !ledgerName.trim()}>
           <Plus className="w-4 h-4 mr-2" />{loading ? 'Creating...' : 'Create Rule'}
         </Button>
+        <Button variant="outline" onClick={handleAssignClick} disabled={assigning || !ledgerName.trim()}>
+          {assigning ? 'Assigning...' : 'Assign to ledger'}
+        </Button>
       </div>
+      <AssignLedgerConfirmModal
+        isOpen={showConfirmModal}
+        onClose={() => setShowConfirmModal(false)}
+        ledgerName={pendingLedgerName}
+        transactionCount={cluster.transactions.length}
+        onConfirm={handleConfirmAddLedger}
+        onDecline={handleAssignOneOff}
+        loading={assigning}
+      />
     </div>
   );
 };
@@ -2025,6 +3021,8 @@ const ClassifiedTransactionsTable = ({
   onFlagAsIncorrect,
   selectedTxIds,
   onToggleRow,
+  contraSet,
+  filterSet,
   // NOTE: onToggleAll is no longer passed here
 }) => {
   const transactionsToShow = transactions.filter(
@@ -2069,7 +3067,27 @@ const ClassifiedTransactionsTable = ({
               </td>
               <td className="p-2 max-w-sm hyphenate">{transaction.Narration}</td>
               <td className="p-2 text-right font-mono">{transaction.Amount?.toLocaleString()}</td>
-              <td className="p-2">{transaction['CR/DR']}</td>
+      <td className="p-2">
+        <div className="flex items-center gap-1 whitespace-nowrap text-sm">
+          <span>{transaction['CR/DR']}</span>
+          {contraSet?.has(transaction.matched_ledger) && (
+            <Badge
+              variant="outline"
+              className="h-5 px-2 text-[10px] leading-none text-amber-800 border-amber-300 bg-amber-50 rounded-full"
+            >
+              Contra
+            </Badge>
+          )}
+          {filterSet?.has(transaction.matched_ledger) && (
+            <Badge
+              variant="outline"
+              className="h-5 px-2 text-[10px] leading-none text-blue-800 border-blue-200 bg-blue-50 rounded-full"
+            >
+              Filtered
+            </Badge>
+          )}
+        </div>
+      </td>
               <td className="p-2 truncate">{transaction.matched_ledger}</td>
               <td className="p-2 text-center">
                 <Button
@@ -2188,11 +3206,30 @@ const BulkActionRibbon = ({
   );
 };
 
-const StickyTableHeader = ({ isAllSelected, onToggleAll }) => {
+const StickyTableHeader = ({ isAllSelected, onToggleAll, sortConfig, onSortChange }) => {
+  const renderSortableHeader = (label, key, align = 'start') => {
+    const isActive = sortConfig?.key === key;
+    const direction = sortConfig?.direction === 'desc' ? 'desc' : 'asc';
+    const SortIcon = isActive ? (direction === 'asc' ? ArrowUp : ArrowDown) : ChevronsUpDown;
+    const justification =
+      align === 'center' ? 'justify-center' : align === 'end' ? 'justify-end' : 'justify-start';
+
+    return (
+      <button
+        type="button"
+        onClick={() => onSortChange(key)}
+        className={`flex items-center gap-1 w-full ${justification} text-left font-semibold text-slate-800 hover:text-blue-700 cursor-pointer select-none`}
+      >
+        <span>{label}</span>
+        <SortIcon className="w-4 h-4 text-slate-400" />
+      </button>
+    );
+  };
+
   return (
     // This div mimics the table row. It's NOT a real <thead>.
     <div className="flex w-full bg-slate-50 border-b border-slate-300 font-semibold text-sm">
-      <div className="p-2 w-24">Date</div>
+      <div className="p-2 w-24">{renderSortableHeader('Date', 'date')}</div>
       <div className="p-2 w-12 text-center">
         <input
           type="checkbox"
@@ -2201,10 +3238,10 @@ const StickyTableHeader = ({ isAllSelected, onToggleAll }) => {
           onChange={onToggleAll}
         />
       </div>
-      <div className="p-2 flex-grow">Description</div>
-      <div className="p-2 w-32 text-right">Amount</div>
-      <div className="p-2 w-24">CR/DR</div>
-      <div className="p-2 w-48">Matched Ledger</div>
+      <div className="p-2 flex-grow">{renderSortableHeader('Description', 'narration')}</div>
+      <div className="p-2 w-32">{renderSortableHeader('Amount', 'amount', 'end')}</div>
+      <div className="p-2 w-24">{renderSortableHeader('CR/DR', 'type')}</div>
+      <div className="p-2 w-48">{renderSortableHeader('Matched Ledger', 'ledger')}</div>
       <div className="p-2 w-24 text-center">Actions</div>
     </div>
   );
@@ -2374,10 +3411,75 @@ const StatementDetailsPage = () => {
   const [detachedTransactions, setDetachedTransactions] = useState([]);
   const [knownLedgers, setKnownLedgers] = useState([]);
   const [selectedTxIds, setSelectedTxIds] = useState(new Set());
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  const contraSet = useMemo(() => new Set(bankAccount?.contra_list || []), [bankAccount]);
+  const filterSet = useMemo(() => new Set(bankAccount?.filter_list || []), [bankAccount]);
 
   const classifiedTxns = useMemo(() => {
     return classificationResult?.classified_transactions || [];
   }, [classificationResult]);
+
+  const sortedClassifiedTxns = useMemo(() => {
+    const txs = [...classifiedTxns];
+    if (!sortConfig?.key) {
+      return txs;
+    }
+
+    const parseAmount = (value) => {
+      if (typeof value === 'number') return value;
+      const numeric = parseFloat(String(value || '0').replace(/,/g, ''));
+      return Number.isNaN(numeric) ? 0 : numeric;
+    };
+
+    const parseDateValue = (value) => {
+      if (!value) return null;
+      const cleanedValue = value.split(' ')[0];
+      // Expecting dd/mm/yyyy; fallback to Date parsing if it fails
+      const parts = cleanedValue.split(/[/-]/);
+      if (parts.length >= 3) {
+        const [day, month, year] = parts;
+        const parsed = new Date(`${year}-${month}-${day}`);
+        if (!Number.isNaN(parsed.getTime())) {
+          return parsed.getTime();
+        }
+      }
+      const fallback = new Date(value);
+      return Number.isNaN(fallback.getTime()) ? null : fallback.getTime();
+    };
+
+    const compareStrings = (a, b) =>
+      (a || '').toString().localeCompare((b || '').toString(), undefined, { sensitivity: 'base' });
+
+    txs.sort((a, b) => {
+      let result = 0;
+      switch (sortConfig.key) {
+        case 'date': {
+          const aTime = parseDateValue(a.Date);
+          const bTime = parseDateValue(b.Date);
+          result = (aTime || 0) - (bTime || 0);
+          break;
+        }
+        case 'narration':
+          result = compareStrings(a.Narration, b.Narration);
+          break;
+        case 'amount':
+          result = parseAmount(a.Amount) - parseAmount(b.Amount);
+          break;
+        case 'type':
+          result = compareStrings(a['CR/DR'], b['CR/DR']);
+          break;
+        case 'ledger':
+          result = compareStrings(a.matched_ledger, b.matched_ledger);
+          break;
+        default:
+          result = 0;
+      }
+
+      return sortConfig.direction === 'desc' ? -result : result;
+    });
+
+    return txs;
+  }, [classifiedTxns, sortConfig]);
 
 
   useEffect(() => {
@@ -2553,11 +3655,20 @@ const statementPeriod = useMemo(() => {
   const handleToggleAll = () => {
     setSelectedTxIds(prev => {
       // If not everything is selected, select all. Otherwise, clear selection.
-      if (prev.size < classifiedTxns.length) {
-        return new Set(classifiedTxns.map(t => t._tempId));
+      if (prev.size < classifiedTxnsToShow.length) {
+        return new Set(classifiedTxnsToShow.map(t => t._tempId));
       } else {
         return new Set();
       }
+    });
+  };
+
+  const handleSortChange = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { key, direction: 'asc' };
     });
   };
    const handleBulkUpdate = async (type, payload = {}) => {
@@ -2894,12 +4005,17 @@ const statementPeriod = useMemo(() => {
             .map(t => t.Narration);
     }, [classificationResult]);
 
+  const classifiedTxnsToShow = useMemo(
+    () =>
+      sortedClassifiedTxns.filter(
+        (t) => t.matched_ledger !== "Suspense" || t.user_confirmed === true
+      ),
+    [sortedClassifiedTxns]
+  );
+
   if (loading || !classificationResult || !pageStats) {
     return <div>Loading and processing statement...</div>;
   }
-   const classifiedTxnsToShow = (classificationResult?.classified_transactions || []).filter(
-    t => t.matched_ledger !== "Suspense" || t.user_confirmed === true
-  );
   const isAllSelected = classifiedTxnsToShow.length > 0 && selectedTxIds.size === classifiedTxnsToShow.length;
   // --- END OF FIX ---
   
@@ -2949,6 +4065,7 @@ const statementPeriod = useMemo(() => {
                 key={cluster.cluster_id} 
                 cluster={cluster} 
                 clientId={statement.client_id}
+                statementId={statementId}
                 onRuleCreated={() => runClassification(true)}
                 otherNarrations={otherNarrations} // Pass the new prop down
                 onDetach={handleDetachTransaction}
@@ -2987,6 +4104,7 @@ const statementPeriod = useMemo(() => {
 
                 }}
                 clientId={statement.client_id}
+                statementId={statementId}
                 onRuleCreated={runClassification} // You can still create a rule from a single detached item
                 otherNarrations={otherNarrations}
                 onDetach={() => {}} // Detaching from this group does nothing
@@ -3011,6 +4129,8 @@ const statementPeriod = useMemo(() => {
           <StickyTableHeader 
             isAllSelected={isAllSelected}
             onToggleAll={handleToggleAll}
+            sortConfig={sortConfig}
+            onSortChange={handleSortChange}
           />
           <BulkActionRibbon
             selectedCount={selectedTxIds.size}
@@ -3024,10 +4144,12 @@ const statementPeriod = useMemo(() => {
         
         {/* The table now sits inside the same container, with no extra wrappers */}
         <ClassifiedTransactionsTable
-          transactions={classifiedTxns}
+          transactions={sortedClassifiedTxns}
           onFlagAsIncorrect={handleFlagAsIncorrect}
           selectedTxIds={selectedTxIds}
           onToggleRow={handleToggleRow}
+          contraSet={contraSet}
+          filterSet={filterSet}
         />
       </div>
       {/* Voucher Modal */}{/* --- ADD THIS COMPONENT AT THE END --- */}
@@ -3046,6 +4168,7 @@ const statementPeriod = useMemo(() => {
 // --- ADD THIS ENTIRE NEW PAGE COMPONENT ---
 const LedgerSamplesPage = () => {
   const { clientId, ledgerId } = useParams();
+  const navigate = useNavigate();
   const [ledger, setLedger] = useState(null);
   const [samples, setSamples] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3054,6 +4177,7 @@ const LedgerSamplesPage = () => {
   const [totalSamples, setTotalSamples] = useState(0);
   const [sampleToDelete, setSampleToDelete] = useState(null);
   const limit = 100;
+  const [clientName, setClientName] = useState('');
 
   const fetchSamples = useCallback(async (currentPage) => {
     setLoading(true);
@@ -3083,16 +4207,29 @@ const LedgerSamplesPage = () => {
     fetchSamples(1);
   }, [fetchSamples]);
 
+  useEffect(() => {
+    const fetchClient = async () => {
+      try {
+        const res = await axios.get(`${API}/clients/${clientId}`);
+        setClientName(res.data.name);
+      } catch (error) {
+        // ignore
+      }
+    };
+    fetchClient();
+  }, [clientId]);
+
   const handleDeleteSample = async () => {
     if (!sampleToDelete) return;
 
     // Optimistic UI update
     const originalSamples = samples;
-    setSamples(prev => prev.filter(s => s !== sampleToDelete));
+    const targetIndex = sampleToDelete.index;
+    setSamples(prev => prev.filter((_, idx) => idx !== targetIndex));
     
     try {
       await axios.delete(`${API}/known-ledgers/${ledgerId}/samples`, {
-        data: sampleToDelete
+        data: { index: targetIndex, sample: sampleToDelete.sample }
       });
       toast.success("Sample deleted successfully.");
       // On successful delete, re-fetch to get accurate total count
@@ -3118,58 +4255,95 @@ const LedgerSamplesPage = () => {
       <div>
         <h1 className="text-3xl font-bold text-slate-900">Ledger Sample Review</h1>
         <p className="text-slate-600 mt-2">
-          Reviewing samples for: <span className="font-bold">{ledger?.ledger_name || '...'}</span> ({totalSamples} total samples)
+          Reviewing samples for: <span className="font-bold">{ledger?.ledger_name || '...'}</span> ({totalSamples} total samples) — Client:{" "}
+          <Link to={`/clients/${clientId}`} className="font-semibold text-primary hover:underline">
+            {clientName || clientId}
+          </Link>
         </p>
+        <div className="mt-4 flex gap-2">
+          <Button variant="outline" onClick={() => navigate(`/clients/${clientId}`)}>
+            ← Back to client
+          </Button>
+          <Button variant="outline" onClick={() => navigate(`/clients/${clientId}/ledgers/manage`)}>
+            ← Back to all known ledgers
+          </Button>
+        </div>
       </div>
 
       <Card className="border-0 shadow-sm">
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-slate-50">
-                  <th className="p-3 text-left font-semibold">Narration</th>
-                  <th className="p-3 text-right font-semibold w-32">Amount</th>
-                  <th className="p-3 text-left font-semibold w-24">Type</th>
-                  <th className="p-3 text-center font-semibold w-24">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+        <CardHeader>
+          <CardTitle>Sample Transactions</CardTitle>
+          <CardDescription>
+            Review and manage sample transactions for this ledger. Delete samples that are no longer relevant.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-28">Date</TableHead>
+                  <TableHead>Narration</TableHead>
+                  <TableHead className="text-right w-32">Amount</TableHead>
+                  <TableHead className="w-24">Type</TableHead>
+                  <TableHead className="text-center w-24">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {loading ? (
-                  <tr><td colSpan="4" className="text-center p-8">Loading samples...</td></tr>
+                  <TableRow>
+                    <TableCell colSpan="5" className="text-center p-8 text-slate-500">
+                      Loading samples...
+                    </TableCell>
+                  </TableRow>
+                ) : samples.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan="5" className="text-center p-8 text-slate-500">
+                      No samples found for this ledger.
+                    </TableCell>
+                  </TableRow>
                 ) : (
                   samples.map((sample, index) => (
-                    <tr key={index} className="border-b hover:bg-slate-50">
-                      <td className="p-3 max-w-xl truncate">{sample.narration}</td>
-                      <td className="p-3 text-right font-mono">{sample.amount.toLocaleString('en-IN')}</td>
-                      <td className="p-3">
+                    <TableRow key={index} className="hover:bg-slate-50">
+                      <TableCell className="text-slate-600">{sample.date || '-'}</TableCell>
+                      <TableCell className="max-w-xl">
+                        <div className="truncate" title={sample.narration}>
+                          {sample.narration}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right font-mono">{sample.amount.toLocaleString('en-IN')}</TableCell>
+                      <TableCell>
                         <Badge variant={sample.type === 'Credit' ? 'default' : 'destructive'} className={sample.type === 'Credit' ? 'bg-green-600' : 'bg-red-600'}>
                           {sample.type}
                         </Badge>
-                      </td>
-                      <td className="p-3 text-center">
-                        <Button variant="destructive" size="icon" className="h-8 w-8" onClick={() => setSampleToDelete(sample)}>
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <Button variant="destructive" size="icon" className="h-8 w-8" onClick={() => setSampleToDelete({ sample, index })}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
-                      </td>
-                    </tr>
+                      </TableCell>
+                    </TableRow>
                   ))
                 )}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
-        </CardContent>
-        {!loading && (
-          <div className="p-4 border-t flex items-center justify-between">
-            <span className="text-sm text-slate-600">
-              Page {page} of {totalPages}
-            </span>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => handlePageChange(page - 1)} disabled={page === 1}>Previous</Button>
-              <Button variant="outline" size="sm" onClick={() => handlePageChange(page + 1)} disabled={page === totalPages}>Next</Button>
+          {!loading && totalPages > 0 && (
+            <div className="flex items-center justify-between mt-4 pt-4 border-t">
+              <span className="text-sm text-slate-600">
+                Page {page} of {totalPages}
+              </span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => handlePageChange(page - 1)} disabled={page === 1}>
+                  Previous
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => handlePageChange(page + 1)} disabled={page === totalPages}>
+                  Next
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </CardContent>
       </Card>
 
       {/* Delete Confirmation Dialog */}
@@ -3665,6 +4839,359 @@ const PatternManagementPage = () => {
   );
 };
 // --- END OF REPLACEMENT ---
+
+const LedgerManagementPage = () => {
+  const { clientId } = useParams();
+  const navigate = useNavigate();
+  const [ledgersData, setLedgersData] = useState({ ledgers: [], total_pages: 1, total_ledgers: 0 });
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [pageSize, setPageSize] = useState(12);
+  const pageSizeOptions = [12, 25, 50, 100, 'all'];
+  const [sortBy, setSortBy] = useState('ledger_name');
+  const [sortDir, setSortDir] = useState('asc');
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [clientName, setClientName] = useState('');
+
+  const sortLedgers = useCallback((list, sortKey, direction) => {
+    const sorted = [...(list || [])].sort((a, b) => {
+      const dir = direction === 'desc' ? -1 : 1;
+      const getValue = (item) => {
+        switch (sortKey) {
+          case 'sample_count':
+            return item.sample_count ?? 0;
+          case 'rule_count':
+            return item.rule_count ?? 0;
+          case 'last_transaction_date': {
+            const d = item.last_transaction_date ? new Date(item.last_transaction_date) : null;
+            return d && !isNaN(d) ? d.getTime() : 0;
+          }
+          case 'is_active':
+            return item.is_active ? 1 : 0;
+          case 'ledger_name':
+          default:
+            return (item.ledger_name || '').toLowerCase();
+        }
+      };
+      const aVal = getValue(a);
+      const bVal = getValue(b);
+      if (aVal < bVal) return -1 * dir;
+      if (aVal > bVal) return 1 * dir;
+      return 0;
+    });
+    return sorted;
+  }, []);
+
+  const fetchLedgers = useCallback(async (page, search, size, sortKey, sortDirection) => {
+    setLoading(true);
+    try {
+      const limit = size === 'all' ? 1000 : (size || 12);
+      const params = new URLSearchParams({
+        page: page,
+        limit: limit,
+        search: search || '',
+        include_inactive: 'true',
+      });
+      const res = await axios.get(`${API}/clients/${clientId}/ledgers?${params.toString()}`);
+      const sorted = sortLedgers(res.data.ledgers, sortKey, sortDirection);
+      setLedgersData({ ...res.data, ledgers: sorted });
+    } catch (error) {
+      toast.error("Failed to fetch ledgers.");
+    } finally {
+      setLoading(false);
+    }
+  }, [clientId, sortLedgers]);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      fetchLedgers(currentPage, searchQuery, pageSize, sortBy, sortDir);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [currentPage, searchQuery, pageSize, sortBy, sortDir, fetchLedgers]);
+
+  useEffect(() => {
+    const fetchClient = async () => {
+      try {
+        const res = await axios.get(`${API}/clients/${clientId}`);
+        setClientName(res.data.name);
+      } catch (error) {
+        // ignore, fall back to id
+      }
+    };
+    fetchClient();
+  }, [clientId]);
+
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const selectPage = (checked) => {
+    if (!ledgersData.ledgers) return;
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (checked) {
+        ledgersData.ledgers.forEach(l => next.add(l.id));
+      } else {
+        ledgersData.ledgers.forEach(l => next.delete(l.id));
+      }
+      return next;
+    });
+  };
+
+  const hasSelection = selectedIds.size > 0;
+
+  const handleSort = (column) => {
+    setSortBy((prev) => {
+      if (prev === column) {
+        setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+        return prev;
+      }
+      setSortDir('asc');
+      return column;
+    });
+  };
+
+  const handleToggleActiveBulk = async (isActive) => {
+    if (!hasSelection) return;
+    setActionLoading(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map(id =>
+          axios.patch(`${API}/known-ledgers/${id}/toggle-active`, { is_active: isActive })
+        )
+      );
+      toast.success(`Ledgers ${isActive ? 'activated' : 'deactivated'} successfully.`);
+      setSelectedIds(new Set());
+      fetchLedgers(currentPage, searchQuery, pageSize, sortBy, sortDir);
+    } catch (error) {
+      toast.error("Failed to update ledger status.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (!hasSelection) return;
+    setActionLoading(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map(id =>
+          axios.delete(`${API}/known-ledgers/${id}`)
+        )
+      );
+      toast.success("Selected ledgers deleted.");
+      setSelectedIds(new Set());
+      fetchLedgers(currentPage, searchQuery, pageSize, sortBy, sortDir);
+    } catch (error) {
+      toast.error("Failed to delete ledgers.");
+    } finally {
+      setActionLoading(false);
+      setShowDeleteConfirm(false);
+    }
+  };
+
+  const formatDate = (value) => {
+    if (!value) return '—';
+    const dateObj = new Date(value);
+    return isNaN(dateObj) ? value : dateObj.toLocaleDateString();
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" onClick={() => navigate(`/clients/${clientId}`)}>
+            <ChevronRight className="w-4 h-4 rotate-180 mr-1" /> Back to Client
+          </Button>
+          <div>
+            <h2 className="text-2xl font-semibold">Review Known Ledgers</h2>
+            <p className="text-slate-600">Client: <span className="font-semibold">{clientName || clientId}</span></p>
+            <p className="text-slate-600">Manage activation state and cleanup in bulk.</p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" disabled={!hasSelection || actionLoading} onClick={() => handleToggleActiveBulk(true)}>
+            Activate
+          </Button>
+          <Button variant="outline" disabled={!hasSelection || actionLoading} onClick={() => handleToggleActiveBulk(false)}>
+            Deactivate
+          </Button>
+          <Button variant="destructive" disabled={!hasSelection || actionLoading} onClick={() => setShowDeleteConfirm(true)}>
+            Delete
+          </Button>
+        </div>
+      </div>
+
+      <Card className="border-0 shadow-sm">
+        <CardHeader className="space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="relative w-full max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <Input
+                placeholder="Search ledgers..."
+                className="pl-9"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setCurrentPage(1);
+                }}
+              />
+            </div>
+            <div className="flex items-center gap-3 text-sm text-slate-600">
+              <div className="flex items-center gap-2">
+                <span>Rows:</span>
+                <Select
+                  value={String(pageSize)}
+                  onValueChange={(val) => {
+                    setPageSize(val === 'all' ? 'all' : Number(val));
+                    setCurrentPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-9 w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {pageSizeOptions.map((opt) => (
+                      <SelectItem key={opt} value={String(opt)}>
+                        {opt === 'all' ? 'All' : opt}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                {ledgersData.total_ledgers ?? ledgersData.ledgers.length} ledger(s)
+              </div>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <p className="text-center text-slate-500 py-8">Loading ledgers...</p>
+          ) : ledgersData.ledgers && ledgersData.ledgers.length > 0 ? (
+            <>
+              <div className="rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-12">
+                        <Checkbox
+                          checked={ledgersData.ledgers.length > 0 && ledgersData.ledgers.every(l => selectedIds.has(l.id))}
+                          onCheckedChange={(checked) => selectPage(Boolean(checked))}
+                          aria-label="Select all"
+                        />
+                      </TableHead>
+                      <TableHead>
+                        <button className="flex items-center gap-1" onClick={() => handleSort('ledger_name')}>
+                          Ledger {sortBy === 'ledger_name' ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : null}
+                        </button>
+                      </TableHead>
+                      <TableHead className="text-right">
+                        <button className="flex items-center gap-1 ml-auto" onClick={() => handleSort('sample_count')}>
+                          Transactions {sortBy === 'sample_count' ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : null}
+                        </button>
+                      </TableHead>
+                      <TableHead className="text-right">
+                        <button className="flex items-center gap-1 ml-auto" onClick={() => handleSort('last_transaction_date')}>
+                          Last Transaction {sortBy === 'last_transaction_date' ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : null}
+                        </button>
+                      </TableHead>
+                      <TableHead className="text-right">
+                        <button className="flex items-center gap-1 ml-auto" onClick={() => handleSort('rule_count')}>
+                          Rules {sortBy === 'rule_count' ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : null}
+                        </button>
+                      </TableHead>
+                      <TableHead className="text-center">
+                        <button className="inline-flex items-center gap-1" onClick={() => handleSort('is_active')}>
+                          Status {sortBy === 'is_active' ? (sortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : null}
+                        </button>
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ledgersData.ledgers.map((ledger) => (
+                      <TableRow key={ledger.id} className="hover:bg-slate-50">
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedIds.has(ledger.id)}
+                            onCheckedChange={() => toggleSelect(ledger.id)}
+                            aria-label={`Select ledger ${ledger.ledger_name}`}
+                          />
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          <Link to={`/clients/${clientId}/ledgers/${ledger.id}`} className="hover:underline">
+                            {ledger.ledger_name}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="text-right">{ledger.sample_count}</TableCell>
+                        <TableCell className="text-right">{formatDate(ledger.last_transaction_date)}</TableCell>
+                        <TableCell className="text-right">{ledger.rule_count}</TableCell>
+                        <TableCell className="text-center">
+                          <Badge variant={ledger.is_active ? "outline" : "secondary"}>
+                            {ledger.is_active ? 'Active' : 'Inactive'}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex items-center justify-between mt-4">
+                <span className="text-sm text-slate-600">
+                  Page {currentPage} of {ledgersData.total_pages}
+                </span>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)}>
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage === ledgersData.total_pages || pageSize === 'all'}
+                    onClick={() => setCurrentPage(p => p + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="text-center text-slate-500 py-8">No ledgers found.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete selected ledgers?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove the selected ledgers and their rules. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={actionLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDeleteSelected} disabled={actionLoading}>
+              Confirm Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+};
+
 // Main App Component
 function App() {
   return (
@@ -3677,6 +5204,7 @@ function App() {
             <Route path="/upload" element={<FileUpload />} />
             <Route path="/clients" element={<ClientManagement />} />
             <Route path="/patterns" element={<PatternManagementPage />} />
+            <Route path="/clients/:clientId/ledgers/manage" element={<LedgerManagementPage />} />
             <Route path="/clients/:clientId/ledgers/:ledgerId" element={<LedgerSamplesPage />} />
             <Route path="/clients/:clientId" element={<ClientDetailsPage />} />
             <Route path="/statements/:statementId" element={<StatementDetailsPage />} />

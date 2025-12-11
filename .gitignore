@@ -3,6 +3,7 @@
 # IDE and editors
 .idea/
 .vscode/
+.cursor/
 
 # Dependencies
 node_modules/
@@ -29,6 +30,11 @@ next-env.d.ts
 /build
 dist/
 dist
+
+# PM2 Configuration
+ecosystem.config.js
+ecosystem.dev.config.js
+**/ecosystem*.config.js
 
 # Environment files (comprehensive coverage)
 
@@ -92,3 +98,7 @@ __pycache__/
 backend/__pycache__/
 backend/venv/
 backend/alembic/
+
+
+# --- ADD THIS SINGLE LINE in their place (e.g., under # Production builds) ---
+**/build

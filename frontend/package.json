@@ -61,7 +61,8 @@
   },
   "scripts": {
     "start": "craco start",
-    "build": "craco build",
+    "start:dev": "craco start",
+    "build": "ren .env .env.temp && craco build && ren .env.temp .env",
     "test": "craco test"
   },
   "browserslist": {

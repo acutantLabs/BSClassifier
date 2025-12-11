@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, JSON, Integer
+from sqlalchemy import Column, String, DateTime, ForeignKey, JSON, Integer, Boolean
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime, timezone
 import uuid
@@ -116,7 +116,7 @@ class DevaluedKeyword(Base):
 class KnownLedger(Base):
     """
     Stores curated ledger information and transaction samples imported from a
-    Tally Day Book export, specific to a client.
+    Tally Day Book export or learned from processed statements, specific to a client.
     """
     __tablename__ = 'known_ledgers'
 
@@ -127,6 +127,10 @@ class KnownLedger(Base):
     # A JSON array of sample objects, e.g.,
     # [{"narration": "...", "amount": 123.45, "type": "Debit"}, ...]
     samples = Column(JSON, nullable=False, default=[])
+    
+    # Controls whether this ledger appears in classification dropdowns
+    # Deactivated ledgers can still receive new samples but won't be suggested
+    is_active = Column(Boolean, nullable=False, default=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
