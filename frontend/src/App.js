@@ -54,20 +54,24 @@ import {
   Filter,
   RefreshCw,
   ChevronRight,
+  ChevronLeft,
   ChevronDown,
   ChevronsUpDown, 
   AlertCircle,
   CheckCircle2,
   HelpCircle,
+  AlertTriangle,
   ArrowUp,
   ArrowDown,
   ArrowLeft,
+  ArrowRight,
   Zap,
   Sparkles,
   Play,
   Power,
   PowerOff,
-  Loader2
+  Loader2,
+  Save
 } from 'lucide-react';
 
 
@@ -441,45 +445,206 @@ const FileUpload = () => {
 
 // Column Mapping Modal Component
 const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient, setSelectedClient, onSuccess }) => {
-  const MAX_PREVIEW_COLUMNS = 10;
   const [mapping, setMapping] = useState({});
   const [statementFormat, setStatementFormat] = useState('single_amount_crdr');
   const [loading, setLoading] = useState(false);
   const [bankAccounts, setBankAccounts] = useState([]);
   const [selectedBankAccount, setSelectedBankAccount] = useState('');
+  const [filterProblematicRows, setFilterProblematicRows] = useState(false);
+  const [filteredColumns, setFilteredColumns] = useState(new Set()); // Track columns to be filtered out
+  
+  // Get problematic row indices from fileData
+  const problematicRowIndices = fileData?.problematic_row_indices || [];
+  const problematicRows = fileData?.problematic_rows || [];
+  const totalRows = fileData?.total_rows || 0;
+  const lastRowsData = fileData?.last_rows_data || [];
 
   // useMemo will re-calculate this data only when fileData changes
   const previewData = useMemo(() => {
     if (!fileData || !Array.isArray(fileData.headers) || !Array.isArray(fileData.preview_data)) {
-      return { headers: [], rows: [] };
+      return { headers: [], rows: [], rowIndexMap: [], showSkipIndicator: false, columnWidths: {} };
     }
 
-    // Find the first empty header
-    const firstEmptyHeaderIndex = fileData.headers.findIndex(h => !h || String(h).trim() === '');
+    // Use all headers (no column limit) - filtered columns will be visually masked but kept for alignment
+    const allHeaders = fileData.headers;
     
-    // Determine the number of columns to display
-    let columnsToDisplay = firstEmptyHeaderIndex === -1 ? fileData.headers.length : firstEmptyHeaderIndex;
-    columnsToDisplay = Math.min(columnsToDisplay, MAX_PREVIEW_COLUMNS);
-
-    // Slice the headers and row data based on the calculated number
-    const slicedHeaders = fileData.headers.slice(0, columnsToDisplay);
-    const slicedRows = (fileData.preview_data || []).map(row => {
-      // Create a new row object with only the desired columns
+    // Process preview data (first 10 rows from backend)
+    const previewRows = (fileData.preview_data || []).map((row, idx) => {
       const newRow = {};
-      slicedHeaders.forEach((header) => {
+      allHeaders.forEach((header) => {
         newRow[header] = row ? row[header] : undefined;
       });
-      return newRow;
+      return { data: newRow, originalIndex: idx };
     });
 
-    return { headers: slicedHeaders, rows: slicedRows.slice(0, 5) }; // Also limit rows for preview
-  }, [fileData]);
+    // Process last rows data
+    const lastRowsStartIndex = totalRows - lastRowsData.length;
+    const lastRows = (lastRowsData || []).map((row, idx) => {
+      const newRow = {};
+      allHeaders.forEach((header) => {
+        newRow[header] = row ? row[header] : undefined;
+      });
+      return { data: newRow, originalIndex: lastRowsStartIndex + idx };
+    });
+
+    // Get problematic row indices set for quick lookup
+    const problematicRowIndicesSet = new Set(problematicRowIndices);
+    
+    // Mark preview rows that are problematic
+    const allPreviewRows = previewRows.map(row => {
+      const isProblematic = problematicRowIndicesSet.has(row.originalIndex);
+      const problematicRow = problematicRows.find(pr => pr.row_index === row.originalIndex);
+      return {
+        ...row,
+        isProblematic,
+        problematicRow: isProblematic ? problematicRow : undefined
+      };
+    });
+
+    // Mark last rows that are problematic
+    const allLastRows = lastRows.map(row => {
+      const isProblematic = problematicRowIndicesSet.has(row.originalIndex);
+      const problematicRow = problematicRows.find(pr => pr.row_index === row.originalIndex);
+      return {
+        ...row,
+        isProblematic,
+        problematicRow: isProblematic ? problematicRow : undefined
+      };
+    });
+
+    // Get problematic rows that aren't in preview or last rows
+    const previewIndicesSet = new Set(previewRows.map(r => r.originalIndex));
+    const lastIndicesSet = new Set(lastRows.map(r => r.originalIndex));
+    const problematicRowsNotInPreview = problematicRows.filter(pr => 
+      !previewIndicesSet.has(pr.row_index) && !lastIndicesSet.has(pr.row_index)
+    );
+
+    // Add problematic rows that aren't in preview or last rows
+    const additionalRows = problematicRowsNotInPreview.map(pr => {
+      const newRow = {};
+      allHeaders.forEach((header) => {
+        // Use transaction_data from problematic row if available
+        newRow[header] = pr.transaction_data?.[header] ?? undefined;
+      });
+      return { data: newRow, originalIndex: pr.row_index, isProblematic: true, problematicRow: pr };
+    });
+
+    // Build rows to show: first 5 + problematic rows + last 5
+    const firstFiveRows = allPreviewRows.slice(0, 5);
+    const firstFiveIndices = new Set(firstFiveRows.map(r => r.originalIndex));
+    
+    // Get last 5 rows (if available)
+    const lastFiveRows = allLastRows.slice(-5);
+    const lastFiveIndices = new Set(lastFiveRows.map(r => r.originalIndex));
+    
+    // Combine all rows and sort by original index
+    const allRows = [...allPreviewRows, ...allLastRows, ...additionalRows];
+    allRows.sort((a, b) => a.originalIndex - b.originalIndex);
+    
+    // Build final rows to show
+    const rowsToShow = [...firstFiveRows];
+    
+    // Add problematic rows that aren't in first 5 or last 5
+    const problematicRowsToAdd = allRows.filter(row => 
+      row.isProblematic && 
+      !firstFiveIndices.has(row.originalIndex) && 
+      !lastFiveIndices.has(row.originalIndex)
+    );
+    
+    // Determine if we need to show skip indicator
+    const needsSkipIndicator = totalRows > 10 && lastFiveRows.length > 0 && firstFiveRows.length > 0;
+    
+    if (needsSkipIndicator) {
+      const firstFiveMaxIndex = Math.max(...firstFiveRows.map(r => r.originalIndex));
+      const lastFiveMinIndex = Math.min(...lastFiveRows.map(r => r.originalIndex));
+      
+      // Add skip indicator if there's a gap between first 5 and last 5
+      if (lastFiveMinIndex > firstFiveMaxIndex + 1) {
+        // Add problematic rows that fall between first 5 and last 5
+        const middleProblematicRows = problematicRowsToAdd.filter(row => 
+          row.originalIndex > firstFiveMaxIndex && row.originalIndex < lastFiveMinIndex
+        );
+        
+        // Calculate skipped count (excluding problematic rows that will be shown)
+        const skippedCount = lastFiveMinIndex - firstFiveMaxIndex - 1 - middleProblematicRows.length;
+        
+        if (skippedCount > 0) {
+          // Add skip indicator row
+          rowsToShow.push({
+            data: {},
+            originalIndex: -1, // Special marker for skip indicator
+            isSkipIndicator: true,
+            skippedCount: skippedCount
+          });
+        }
+        
+        // Add problematic rows in the middle
+        rowsToShow.push(...middleProblematicRows);
+      } else {
+        // No gap, just add problematic rows
+        rowsToShow.push(...problematicRowsToAdd);
+      }
+    } else {
+      // Add all problematic rows that aren't in first 5 or last 5
+      rowsToShow.push(...problematicRowsToAdd);
+    }
+    
+    // Add last 5 rows
+    rowsToShow.push(...lastFiveRows);
+
+    // Create a map from display index to original index
+    const rowIndexMap = rowsToShow.map(r => r.originalIndex);
+
+    // Calculate adaptive column widths based on content
+    const columnWidths = {};
+    const allDataRows = rowsToShow.map(r => r.data);
+    
+    allHeaders.forEach((header) => {
+      // Check if this is a date column
+      const isDateColumn = /date|dt|txndate|transactiondate|valuedate/i.test(header);
+      
+      // Start with a reasonable header length (cap at 10 chars to avoid oversized columns)
+      const headerLength = String(header || '').length;
+      let maxLength = Math.min(headerLength, 10);
+      
+      // Check all rows for this column
+      allDataRows.forEach((row) => {
+        const cellValue = row[header];
+        if (cellValue !== undefined && cellValue !== null) {
+          const cellStr = String(cellValue);
+          maxLength = Math.max(maxLength, cellStr.length);
+        }
+      });
+      
+      // Calculate width: use smaller multiplier for date columns (6px) vs regular columns (8px)
+      // Minimum width: 80px, Maximum width: 300px
+      const charWidth = isDateColumn ? 6 : 8;
+      const calculatedWidth = Math.max(80, Math.min(300, maxLength * charWidth + 32));
+      columnWidths[header] = calculatedWidth;
+    });
+
+    return { 
+      headers: allHeaders, 
+      rows: rowsToShow.map(r => r.data), // Keep all data including filtered columns for alignment
+      rowIndexMap: rowIndexMap,
+      rowMetadata: rowsToShow.map(r => ({ 
+        isProblematic: r.isProblematic, 
+        problematicRow: r.problematicRow,
+        isSkipIndicator: r.isSkipIndicator || false,
+        skippedCount: r.skippedCount || 0
+      })),
+      showSkipIndicator: needsSkipIndicator,
+      columnWidths: columnWidths
+    };
+  }, [fileData, problematicRows, problematicRowIndices, totalRows, lastRowsData, filteredColumns]);
 
   useEffect(() => {
     if (fileData?.suggested_mapping) {
       setMapping(fileData.suggested_mapping);
       setStatementFormat(fileData.suggested_mapping.statement_format || 'single_amount_crdr');
     }
+    // Reset filtered columns when fileData changes
+    setFilteredColumns(new Set());
   }, [fileData]);
 
   useEffect(() => {
@@ -499,6 +664,27 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
     };
     fetchBankAccounts();
   }, [selectedClient]);
+
+  // Handler to toggle column filtering
+  const handleColumnHeaderClick = (header) => {
+    // Check if this column is mapped
+    const isMapped = Object.values(mapping).includes(header);
+    if (isMapped && !filteredColumns.has(header)) {
+      // Prevent filtering mapped columns
+      toast.error(`Cannot filter column "${header}" as it is currently mapped. Please change the mapping first.`);
+      return;
+    }
+    
+    setFilteredColumns(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(header)) {
+        newSet.delete(header);
+      } else {
+        newSet.add(header);
+      }
+      return newSet;
+    });
+  };
 
   const handleConfirmMapping = async () => {
     if (!selectedClient) {
@@ -524,21 +710,31 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
           credit_column: mapping.credit_column,
           debit_column: mapping.debit_column
         }),
-        balance_column: mapping.balance_column === 'none' ? null : mapping.balance_column
+        balance_column: mapping.balance_column === 'none' ? null : mapping.balance_column,
+        filtered_columns: Array.from(filteredColumns) // Send filtered columns to backend
       };
 
+      // Proceed with confirmation (use filterProblematicRows state from checkbox)
       const response = await axios.post(
-        `${API}/confirm-mapping/${fileData.file_id}?client_id=${selectedClient}&bank_account_id=${selectedBankAccount}`,
+        `${API}/confirm-mapping/${fileData.file_id}?client_id=${selectedClient}&bank_account_id=${selectedBankAccount}&filter_problematic_rows=${filterProblematicRows}`,
         mappingData
       );
       
-      onSuccess(response.data.statement_id);      
-      toast.success('Mapping confirmed and statement processed!');
+      onSuccess(response.data.statement_id);
+      if (filterProblematicRows && response.data.rows_filtered > 0) {
+        toast.success(`Mapping confirmed! Processed ${response.data.rows_processed} rows (${response.data.rows_filtered} problematic rows filtered out).`);
+      } else {
+        toast.success('Mapping confirmed and statement processed!');
+      }
 
     } catch (error) {
-      toast.error('Failed to confirm mapping. Please try again.');
+      if (error.response?.status === 400) {
+        toast.error(error.response.data.detail || 'Validation failed. Please check your mapping.');
+      } else {
+        toast.error('Failed to confirm mapping. Please try again.');
+      }
       console.error('Mapping error:', error);
-      onClose();
+      setShowProblematicRowsModal(false);
     } finally {
       setLoading(false);
     }
@@ -548,102 +744,114 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
   //Change Upload statement modal size here
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-6xl max-h-[98vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="text-2xl font-bold flex items-center">
-            <FileSpreadsheet className="w-6 h-6 mr-2 text-blue-500" />
+      <DialogContent className="max-w-[90vw] max-h-[95vh] overflow-y-auto translate-y-[calc(-50%-15px)]">
+        <DialogHeader className="pb-3">
+          <DialogTitle className="text-xl font-bold flex items-center">
+            <FileSpreadsheet className="w-5 h-5 mr-2 text-blue-500" />
             Confirm Column Mapping
           </DialogTitle>
-          <DialogDescription>
-            Review and confirm the column mapping for {fileData.filename}
+          <DialogDescription className="text-sm">
+            Review and confirm the column mapping for <span className="text-blue-600 font-semibold">{fileData.filename}</span>
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-6">
-          {/* Client Selection */}
-          <div className="space-y-2">
-            <Label>Select Client</Label>
-            <Select value={selectedClient} onValueChange={setSelectedClient}>
-              <SelectTrigger>
-                <SelectValue placeholder="Choose a client" />
-              </SelectTrigger>
-              <SelectContent>
-                {clients.map(client => (
-                  <SelectItem key={client.id} value={client.id}>
-                    {client.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          {/* --- ADD THIS ENTIRE JSX BLOCK --- */}
-          <div className="space-y-2">
-            <Label>Select Bank Account</Label>
-            <Select 
-              value={selectedBankAccount} 
-              onValueChange={setSelectedBankAccount}
-              disabled={!selectedClient || bankAccounts.length === 0}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="First, select a client" />
-              </SelectTrigger>
-              <SelectContent>
-                {bankAccounts.map(account => (
-                  <SelectItem key={account.id} value={account.id}>
-                    {account.ledger_name} ({account.bank_name})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          {/* --- END OF ADDITION --- */}
-
-          {/* Statement Format Selection */}
-          <div className="space-y-4">
-            <Label>Statement Format:</Label>
-            <div className="flex gap-4">
-              <div className="flex items-center space-x-2">
-                <input
-                  type="radio"
-                  id="single_amount"
-                  name="format"
-                  value="single_amount_crdr"
-                  checked={statementFormat === 'single_amount_crdr'}
-                  onChange={(e) => setStatementFormat(e.target.value)}
-                  className="w-4 h-4 text-blue-600"
-                />
-                <Label htmlFor="single_amount">Single Amount + CR/DR</Label>
+        <div className="space-y-4">
+          {/* Client and Bank Account Selection - Side by Side */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-1.5 relative">
+              <div className="flex items-center gap-1.5">
+                <Label className="text-sm">Select Client</Label>
+                {/* Green arrow indicator - shows when client is not selected */}
+                {!selectedClient && (
+                  <ArrowLeft className="w-6 h-6 text-green-600 drop-shadow-md animate-pulse" />
+                )}
               </div>
-              <div className="flex items-center space-x-2">
-                <input
-                  type="radio"
-                  id="separate_columns"
-                  name="format"
-                  value="separate_credit_debit"
-                  checked={statementFormat === 'separate_credit_debit'}
-                  onChange={(e) => setStatementFormat(e.target.value)}
-                  className="w-4 h-4 text-blue-600"
-                />
-                <Label htmlFor="separate_columns">Separate Credit/Debit</Label>
+              <Select value={selectedClient} onValueChange={setSelectedClient}>
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="Choose a client" />
+                </SelectTrigger>
+                <SelectContent>
+                  {clients.map(client => (
+                    <SelectItem key={client.id} value={client.id}>
+                      {client.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5 relative">
+              <div className="flex items-center gap-1.5">
+                <Label className="text-sm">Select Bank Account</Label>
+                {/* Green arrow indicator - shows when client is selected but bank account is not */}
+                {selectedClient && !selectedBankAccount && (
+                  <ArrowLeft className="w-6 h-6 text-green-600 drop-shadow-md animate-pulse" />
+                )}
               </div>
+              <Select 
+                value={selectedBankAccount} 
+                onValueChange={setSelectedBankAccount}
+                disabled={!selectedClient || bankAccounts.length === 0}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="First, select a client" />
+                </SelectTrigger>
+                <SelectContent>
+                  {bankAccounts.map(account => (
+                    <SelectItem key={account.id} value={account.id}>
+                      {account.ledger_name} ({account.bank_name})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
           {/* --- START OF REPLACEMENT JSX BLOCK --- */}
 
-{/* Use a 10-column grid for a 30/70 split on large screens */}
-<div className="grid grid-cols-10 gap-6">
-  {/* Column Mapping section spans 3 columns */}
-  <div className="col-span-10 lg:col-span-3 space-y-4">
-    <h3 className="text-lg font-semibold">Column Mapping</h3>
+{/* Use a 10-column grid for a 20/80 split on large screens */}
+<div className="grid grid-cols-10 gap-4">
+  {/* Column Mapping section spans 2 columns */}
+  <div className="col-span-10 lg:col-span-2 space-y-3">
+    <h3 className="text-base font-semibold">Column Mapping</h3>
     
-    <div className="space-y-3">
+    {/* Statement Format Selection - Vertical */}
+    <div className="space-y-2 pb-2 border-b">
+      <Label className="text-sm">Statement Format:</Label>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center space-x-2">
+          <input
+            type="radio"
+            id="single_amount"
+            name="format"
+            value="single_amount_crdr"
+            checked={statementFormat === 'single_amount_crdr'}
+            onChange={(e) => setStatementFormat(e.target.value)}
+            className="w-4 h-4 text-blue-600"
+          />
+          <Label htmlFor="single_amount" className="text-sm font-normal cursor-pointer">Single Amount + CR/DR</Label>
+        </div>
+        <div className="flex items-center space-x-2">
+          <input
+            type="radio"
+            id="separate_columns"
+            name="format"
+            value="separate_credit_debit"
+            checked={statementFormat === 'separate_credit_debit'}
+            onChange={(e) => setStatementFormat(e.target.value)}
+            className="w-4 h-4 text-blue-600"
+          />
+          <Label htmlFor="separate_columns" className="text-sm font-normal cursor-pointer">Separate Credit/Debit</Label>
+        </div>
+      </div>
+    </div>
+    
+    <div className="space-y-2.5">
       {/* ... (All your Select dropdowns for mapping go here, UNCHANGED) ... */}
       {/* Date Column */}
       <div>
-        <Label>Date Column</Label>
+        <Label className="text-sm">Date Column</Label>
         <Select value={mapping.date_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, date_column: value}))}>
-          <SelectTrigger><SelectValue placeholder="Select date column" /></SelectTrigger>
+          <SelectTrigger className="h-9"><SelectValue placeholder="Select date column" /></SelectTrigger>
           <SelectContent>
             {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
           </SelectContent>
@@ -651,9 +859,9 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
       </div>
       {/* Description/Narration Column */}
       <div>
-        <Label>Description/Narration Column</Label>
+        <Label className="text-sm">Description/Narration Column</Label>
         <Select value={mapping.narration_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, narration_column: value}))}>
-          <SelectTrigger><SelectValue placeholder="Select narration column" /></SelectTrigger>
+          <SelectTrigger className="h-9"><SelectValue placeholder="Select narration column" /></SelectTrigger>
           <SelectContent>
             {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
           </SelectContent>
@@ -663,18 +871,18 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
       {statementFormat === 'single_amount_crdr' ? (
         <>
           <div>
-            <Label>Amount Column</Label>
+            <Label className="text-sm">Amount Column</Label>
             <Select value={mapping.amount_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, amount_column: value}))}>
-              <SelectTrigger><SelectValue placeholder="Select amount column" /></SelectTrigger>
+              <SelectTrigger className="h-9"><SelectValue placeholder="Select amount column" /></SelectTrigger>
               <SelectContent>
                 {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
               </SelectContent>
             </Select>
           </div>
           <div>
-            <Label>CR/DR Column</Label>
+            <Label className="text-sm">CR/DR Column</Label>
             <Select value={mapping.crdr_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, crdr_column: value}))}>
-              <SelectTrigger><SelectValue placeholder="Select CR/DR column" /></SelectTrigger>
+              <SelectTrigger className="h-9"><SelectValue placeholder="Select CR/DR column" /></SelectTrigger>
               <SelectContent>
                 {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
               </SelectContent>
@@ -684,18 +892,18 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
       ) : (
         <>
           <div>
-            <Label>Credit Column</Label>
+            <Label className="text-sm">Credit Column</Label>
             <Select value={mapping.credit_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, credit_column: value}))}>
-              <SelectTrigger><SelectValue placeholder="Select credit column" /></SelectTrigger>
+              <SelectTrigger className="h-9"><SelectValue placeholder="Select credit column" /></SelectTrigger>
               <SelectContent>
                 {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
               </SelectContent>
             </Select>
           </div>
           <div>
-            <Label>Debit Column</Label>
+            <Label className="text-sm">Debit Column</Label>
             <Select value={mapping.debit_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, debit_column: value}))}>
-              <SelectTrigger><SelectValue placeholder="Select debit column" /></SelectTrigger>
+              <SelectTrigger className="h-9"><SelectValue placeholder="Select debit column" /></SelectTrigger>
               <SelectContent>
                 {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
               </SelectContent>
@@ -705,9 +913,9 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
       )}
       {/* Balance Column (UNCHANGED) */}
       <div>
-        <Label>Balance Column (Optional)</Label>
+        <Label className="text-sm">Balance Column (Optional)</Label>
         <Select value={mapping.balance_column || ''} onValueChange={(value) => setMapping(prev => ({...prev, balance_column: value}))}>
-          <SelectTrigger><SelectValue placeholder="Select balance column" /></SelectTrigger>
+          <SelectTrigger className="h-9"><SelectValue placeholder="Select balance column" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="none">None</SelectItem>
             {fileData.headers.map(header => (<SelectItem key={header} value={header}>{header}</SelectItem>))}
@@ -717,65 +925,222 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
     </div>
   </div>
 
-  {/* Data Preview section spans 7 columns */}
-  <div className="col-span-10 lg:col-span-7 space-y-4">
-    <h3 className="text-lg font-semibold">Data Preview</h3>
-    <ScrollArea className="h-96 border rounded-lg">
+  {/* Data Preview section spans 8 columns - aligned with Statement Format */}
+  <div className="col-span-10 lg:col-span-8 space-y-3">
+    <h3 className="text-base font-semibold">Data Preview</h3>
+    
+    {/* Warning Banner for Problematic Rows */}
+    {problematicRows.length > 0 && (
+      <div className="inline-flex flex-col bg-orange-50 border border-orange-200 rounded-lg p-2 space-y-1.5">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-orange-600 flex-shrink-0" />
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-orange-900">
+              {problematicRows.length} row(s) have missing or empty required fields
+            </span>
+            <span className="text-xs text-orange-700">
+              (Row(s): {problematicRows.map(pr => pr.row_number).join(', ')})
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 pl-6">
+          <Checkbox 
+            id="filter-problematic" 
+            checked={filterProblematicRows}
+            onCheckedChange={setFilterProblematicRows}
+            className="h-3.5 w-3.5"
+          />
+          <Label htmlFor="filter-problematic" className="text-xs font-medium cursor-pointer">
+            Filter out problematic rows ({problematicRows.length} rows will be excluded)
+          </Label>
+        </div>
+      </div>
+    )}
+    
+    <div className="h-[420px] border rounded-lg overflow-auto">
       {/* Add a div for horizontal scrolling */}
-      <div className="overflow-x-auto p-4">
-        <table className="w-full text-sm whitespace-nowrap">
+      <div className="p-3">
+        <table className="w-full text-sm">
           <thead>
             <tr className="border-b">
-              {/* Use our new 'previewData' variable */}
-              {previewData.headers.map((header, index) => (
-                <th key={index} className="text-left p-2 font-medium bg-slate-50 align-top">
-  {/* Use a flex container to stack items vertically */}
-  <div className="flex flex-col items-start">
-    {/* Header Title */}
-    <span className="font-semibold">{header}</span>
-    
-    {/* Conditionally render the badge below the title */}
-    {Object.values(mapping).includes(header) && (
-      <Badge 
-        variant="default" 
-        className="mt-1 text-xs bg-blue-500 hover:bg-blue-600 text-white"
-      >
-        {Object.keys(mapping).find(key => mapping[key] === header)?.replace(/_/g, ' ')}
-      </Badge>
-    )}
-  </div>
-</th>
-              ))}
+              {/* Row number column header */}
+              <th className="text-left px-1.5 py-1.5 font-medium bg-slate-50 align-top sticky left-0 z-20 border-r shadow-[2px_0_2px_-1px_rgba(0,0,0,0.1)] w-12">
+                <span className="font-semibold text-xs">No.</span>
+              </th>
+              {/* Show all headers including filtered ones for visual reference */}
+              {fileData.headers.map((header, index) => {
+                const isFiltered = filteredColumns.has(header);
+                const columnWidth = previewData.columnWidths?.[header] || 120;
+                const isMapped = Object.values(mapping).includes(header);
+                
+                return (
+                  <th 
+                    key={index} 
+                    onClick={() => handleColumnHeaderClick(header)}
+                    className={`text-left p-1.5 pb-8 font-medium align-top cursor-pointer transition-all break-words relative ${
+                      isFiltered 
+                        ? 'bg-red-50 opacity-50 line-through' 
+                        : 'bg-slate-50 hover:bg-slate-100'
+                    }`}
+                    style={{ width: `${columnWidth}px`, minWidth: `${columnWidth}px`, maxWidth: `${columnWidth}px` }}
+                    title={isFiltered ? 'Click to include this column' : 'Click to filter out this column'}
+                  >
+                    {/* Header Title */}
+                    <div className="flex items-start gap-2 flex-wrap">
+                      <span className={`font-semibold break-words ${isFiltered ? 'text-red-600' : ''}`}>
+                        {header}
+                      </span>
+                      {isFiltered && (
+                        <Filter className="w-3 h-3 text-red-600 flex-shrink-0 mt-0.5" />
+                      )}
+                    </div>
+                    
+                    {/* Badges container - absolutely positioned at bottom */}
+                    <div className="absolute bottom-1.5 left-1.5 right-1.5">
+                      {/* Conditionally render the badge below the title */}
+                      {isMapped && !isFiltered && (() => {
+                        const badgeText = Object.keys(mapping).find(key => mapping[key] === header)?.replace(/_/g, ' ').replace(/column/gi, 'col.') || '';
+                        const titleCaseText = badgeText.split(' ').map(word => 
+                          word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+                        ).join(' ');
+                        return (
+                          <Badge 
+                            variant="default" 
+                            className="text-xs bg-blue-500 hover:bg-blue-600 text-white whitespace-nowrap"
+                          >
+                            {titleCaseText}
+                          </Badge>
+                        );
+                      })()}
+                      {isFiltered && (
+                        <Badge 
+                          variant="destructive" 
+                          className="text-xs"
+                        >
+                          Filtered
+                        </Badge>
+                      )}
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
             {/* Use our new 'previewData' variable */}
-            {previewData.rows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="border-b">
-                {previewData.headers.map((header, colIndex) => (
-                  <td key={colIndex} className="p-2 text-xs max-w-32 truncate">
-                    {row[header]}
+            {previewData.rows.map((row, displayIndex) => {
+              // Get metadata for this row
+              const metadata = previewData.rowMetadata?.[displayIndex];
+              const isProblematic = metadata?.isProblematic || false;
+              const problematicRow = metadata?.problematicRow;
+              const isSkipIndicator = metadata?.isSkipIndicator || false;
+              const skippedCount = metadata?.skippedCount || 0;
+              const originalRowIndex = previewData.rowIndexMap?.[displayIndex] ?? displayIndex;
+              
+              // Handle skip indicator row
+              if (isSkipIndicator) {
+                return (
+                  <tr 
+                    key={`skip-${displayIndex}`} 
+                    className="border-b bg-slate-100 hover:bg-slate-200"
+                  >
+                    <td colSpan={fileData.headers.length + 1} className="p-4 text-center text-xs font-medium text-slate-600">
+                      <div className="flex items-center justify-center gap-2">
+                        <div className="flex-1 border-t border-slate-300"></div>
+                        <span className="px-3 py-1 bg-slate-200 rounded-full">
+                          ... {skippedCount} row(s) skipped ...
+                        </span>
+                        <div className="flex-1 border-t border-slate-300"></div>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+              
+              return (
+                <tr 
+                  key={`row-${originalRowIndex}-${displayIndex}`} 
+                  className={`border-b ${isProblematic ? 'bg-orange-50 hover:bg-orange-100' : 'hover:bg-slate-50'}`}
+                >
+                  {/* Row number column */}
+                  <td className={`px-1.5 py-1.5 text-xs font-medium text-slate-600 sticky left-0 z-10 border-r shadow-[2px_0_2px_-1px_rgba(0,0,0,0.1)] w-12 ${isProblematic ? 'bg-orange-50' : 'bg-white'}`}>
+                    <div className="flex flex-col gap-0.5">
+                      <span>{originalRowIndex >= 0 ? originalRowIndex + 1 : '-'}</span>
+                      {isProblematic && (
+                        <Badge variant="destructive" className="text-[10px] px-1 py-0 leading-tight w-fit">
+                          Problematic
+                        </Badge>
+                      )}
+                    </div>
                   </td>
-                ))}
-              </tr>
-            ))}
+                  
+                  {/* Show all headers to match header row, but mask filtered columns */}
+                  {previewData.headers.map((header, colIndex) => {
+                    const isFiltered = filteredColumns.has(header);
+                    
+                    // Check if this header corresponds to a missing field
+                    const isMissingField = problematicRow?.missing_fields?.some(field => {
+                      const suggestedMapping = fileData?.suggested_mapping || {};
+                      const currentMapping = mapping;
+                      const fieldMap = {
+                        'Date': currentMapping.date_column || suggestedMapping.date_column,
+                        'Narration': currentMapping.narration_column || suggestedMapping.narration_column,
+                        'Amount': currentMapping.amount_column || currentMapping.credit_column || currentMapping.debit_column || suggestedMapping.amount_column,
+                        'CR/DR': currentMapping.crdr_column || suggestedMapping.crdr_column
+                      };
+                      return fieldMap[field] === header;
+                    });
+                    
+                    const cellValue = row[header];
+                    const isEmpty = !cellValue || (typeof cellValue === 'string' && cellValue.trim() === '');
+                    const isProblematicCell = isProblematic && isMissingField;
+                    const columnWidth = previewData.columnWidths?.[header] || 120;
+                    
+                    return (
+                      <td 
+                        key={colIndex} 
+                        className={`p-1.5 text-xs truncate whitespace-nowrap ${
+                          isFiltered 
+                            ? 'bg-red-50 opacity-50 line-through' 
+                            : isProblematicCell 
+                              ? 'bg-red-100 font-semibold' 
+                              : ''
+                        }`}
+                        style={{ width: `${columnWidth}px`, minWidth: `${columnWidth}px`, maxWidth: `${columnWidth}px` }}
+                        title={isProblematicCell ? `Missing field: ${problematicRow?.missing_fields?.join(', ')}` : (isFiltered ? 'This column will be filtered out' : (cellValue || ''))}
+                      >
+                        {isFiltered ? (
+                          <span className="text-red-400 italic">(filtered)</span>
+                        ) : isEmpty && isProblematicCell ? (
+                          <span className="text-red-600 italic font-bold">(empty)</span>
+                        ) : (
+                          <span className={isProblematicCell && !isEmpty ? 'text-red-700' : ''}>
+                            {cellValue || <span className="text-slate-400 italic">-</span>}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
-    </ScrollArea>
+    </div>
   </div>
 </div>
 
 {/* --- END OF REPLACEMENT JSX BLOCK --- */}
 
-          <div className="flex justify-end gap-4 pt-4 border-t">
-            <Button variant="outline" onClick={onClose}>
+          <div className="flex justify-end gap-3 pt-3 border-t mt-4">
+            <Button variant="outline" onClick={onClose} className="h-9">
               Cancel
             </Button>
             <Button 
               onClick={handleConfirmMapping} 
               disabled={loading || !selectedClient}
-              className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
+              className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 h-9"
             >
               {loading ? (
                 <>
@@ -792,6 +1157,7 @@ const ColumnMappingModal = ({ isOpen, onClose, fileData, clients, selectedClient
           </div>
         </div>
       </DialogContent>
+      
     </Dialog>
   );
 };
@@ -2355,13 +2721,6 @@ const LearnLedgersModal = ({ isOpen, onClose, clientId, statements, onSuccess })
   );
 };
 
-// Missing ArrowRight import - add inline component
-const ArrowRight = ({ className }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
-  </svg>
-);
-
 // --- END OF LEARN LEDGERS MODAL ---
 
 // --- ADD THIS ENTIRE NEW MODAL COMPONENT ---
@@ -3294,8 +3653,14 @@ const StatementPageHeader = ({
   bankAccount,
   statement,
   stats,
-  statementPeriod // <-- New Prop
+  statementPeriod, // <-- New Prop
+  dataIntegrityCheck, // <-- New Prop for data integrity
+  onRebuildClick, // <-- New Prop for rebuild button handler
+  clientStatements = [], // <-- New Prop for navigation
+  currentStatementId // <-- New Prop for navigation
 }) => {
+  const navigate = useNavigate();
+  
   if (!client || !statement || !stats) { // bankAccount can be null for old statements
     return <div>Loading header...</div>;
   }
@@ -3310,14 +3675,49 @@ const StatementPageHeader = ({
     receiptCount, paymentCount, contraCount, filteredCount
   } = stats;
 
+  // Calculate previous and next statement IDs
+  const currentIndex = clientStatements.findIndex(s => s.id === currentStatementId);
+  const previousStatementId = currentIndex > 0 ? clientStatements[currentIndex - 1]?.id : null;
+  const nextStatementId = currentIndex >= 0 && currentIndex < clientStatements.length - 1 
+    ? clientStatements[currentIndex + 1]?.id : null;
+
+  const handleNavigateToClient = () => {
+    if (client?.id) {
+      navigate(`/clients/${client.id}`);
+    }
+  };
+
+  const handleNavigateToStatement = (statementId) => {
+    if (statementId) {
+      navigate(`/statements/${statementId}`);
+    }
+  };
+
   return (
     <div className="mb-8">
       {/* Breadcrumb Section */}
       <div className="mb-4">
-        <h2 className="text-lg font-semibold text-slate-800">
-          {client.name} 
-          {bankAccount ? ` > ${bankAccount.ledger_name}` : ' > (No Linked Account)'}
-        </h2>
+        <div className="flex items-center gap-2 mb-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleNavigateToClient}
+            className="text-slate-600 hover:text-slate-900 pl-0 text-[15px]"
+          >
+            <ArrowLeft className="w-4 h-4 mr-1.5" />
+            Back
+          </Button>
+          <span className="text-slate-400">|</span>
+          <h2 className="text-lg font-semibold text-slate-800">
+            <Link
+              to={`/clients/${client.id}`}
+              className="text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              {client.name}
+            </Link>
+            {bankAccount ? ` > ${bankAccount.ledger_name}` : ' > (No Linked Account)'}
+          </h2>
+        </div>
         <p className="text-sm text-slate-500">{statement.filename}</p>
       </div>
 
@@ -3348,6 +3748,78 @@ const StatementPageHeader = ({
            {/* Bottom-Left Card: Summary */}
           <div className="text-xs text-slate-600 border-t pt-4">
             <h3 className="font-semibold text-slate-700 text-sm mb-3">Statement Summary</h3>
+            
+            {/* Data Integrity Warning */}
+            {dataIntegrityCheck && !dataIntegrityCheck.is_match && (
+              <div className="mb-4 space-y-2">
+                {/* Missing Rows Warning */}
+                {dataIntegrityCheck.missing_rows_count > 0 && (
+                  <div className="p-3 bg-red-100 border-l-4 border-red-500 rounded-r-md">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="font-bold text-red-800 text-sm">
+                          ⚠️ {dataIntegrityCheck.missing_rows_count} transaction(s) completely missing from processed data
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Partial Data Loss Warning */}
+                {dataIntegrityCheck.partial_data_loss_count > 0 && (
+                  <div className="p-3 bg-yellow-100 border-l-4 border-yellow-500 rounded-r-md">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="font-bold text-yellow-800 text-sm">
+                          ⚠️ {dataIntegrityCheck.partial_data_loss_count} transaction(s) have missing fields (Amount/Date/Narration/CR-DR)
+                        </p>
+                        <p className="text-yellow-700 text-xs mt-1">
+                          These rows exist but are missing critical data. They can be updated with data from raw source.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Extra Transactions Warning */}
+                {dataIntegrityCheck.extra_transactions_count > 0 && (
+                  <div className="p-3 bg-orange-100 border-l-4 border-orange-500 rounded-r-md">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="font-bold text-orange-800 text-sm">
+                          ⚠️ {dataIntegrityCheck.extra_transactions_count} extra transaction(s) in processed data (not in raw data)
+                        </p>
+                        <p className="text-orange-700 text-xs mt-1">
+                          These transactions exist in processed data but not in the original raw data. They may have been added manually.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Summary and Action Button */}
+                <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+                  <p className="text-red-800 text-xs mb-2">
+                    <strong>Summary:</strong> Raw data has {dataIntegrityCheck.raw_data_count} transactions, 
+                    processed data has {dataIntegrityCheck.processed_data_count} transactions.
+                  </p>
+                  {onRebuildClick && (
+                    <Button 
+                      size="sm" 
+                      onClick={onRebuildClick}
+                      className="bg-red-600 hover:bg-red-700 text-white text-xs"
+                    >
+                      <RefreshCw className="w-3 h-3 mr-1" />
+                      Rebuild & Fix Data Integrity Issues
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+            
             <div className="space-y-1.5">
               <div>
                 <span className="font-medium text-slate-500">Period: </span>
@@ -3384,8 +3856,43 @@ const StatementPageHeader = ({
         {/* Right Column Group (Pie Chart) */}
         <div className="lg:col-span-2 space-y-2 flex flex-col">
            <h3 className="font-semibold text-slate-700 text-center">Ledger Distribution</h3>
-           <div className="flex-grow">
+           <div className="flex-grow relative flex items-center justify-center">
+             {/* Previous Button */}
+             {previousStatementId && (
+               <button
+                 className="absolute left-0 top-0 bottom-0 h-full w-12 flex items-center justify-center bg-transparent hover:bg-slate-100/50 transition-colors z-10 cursor-pointer group"
+                 onClick={() => handleNavigateToStatement(previousStatementId)}
+                 title="Previous Statement"
+               >
+                 <ChevronLeft className="w-6 h-6 text-slate-600 group-hover:text-slate-900" />
+               </button>
+             )}
+             
              <LedgerDistributionChart data={chartData} />
+             
+             {/* Next Button */}
+             {nextStatementId && (
+               <button
+                 className="absolute right-0 top-0 bottom-0 h-full w-12 flex items-center justify-center bg-transparent hover:bg-slate-100/50 transition-colors z-10 cursor-pointer group overflow-visible"
+                 onClick={() => handleNavigateToStatement(nextStatementId)}
+                 title="Next Statement"
+               >
+                 <svg 
+                   className="text-slate-600 group-hover:text-slate-900" 
+                   width="24" 
+                   height="50" 
+                   viewBox="0 0 24 24" 
+                   fill="none" 
+                   stroke="currentColor" 
+                   strokeWidth="2" 
+                   strokeLinecap="round" 
+                   strokeLinejoin="round"
+                   style={{ minHeight: '50px' }}
+                 >
+                   <path d="m9 18 6-6-6-6" />
+                 </svg>
+               </button>
+             )}
            </div>
         </div>
       </div>
@@ -3412,6 +3919,23 @@ const StatementDetailsPage = () => {
   const [knownLedgers, setKnownLedgers] = useState([]);
   const [selectedTxIds, setSelectedTxIds] = useState(new Set());
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+  
+  // State tracking for uncommitted changes
+  const [hasUncommittedChanges, setHasUncommittedChanges] = useState(false);
+  const [uncommittedChangeCount, setUncommittedChangeCount] = useState(0);
+  const [lastSavedState, setLastSavedState] = useState(null);
+  
+  // Data integrity check state
+  const [dataIntegrityCheck, setDataIntegrityCheck] = useState(null);
+  const [showRebuildModal, setShowRebuildModal] = useState(false);
+  const [showVoucherConfirmation, setShowVoucherConfirmation] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildOptions, setRebuildOptions] = useState({
+    update_partial_loss: true,
+    add_missing_rows: true,
+    remove_extra_transactions: false
+  });
+  const [clientStatements, setClientStatements] = useState([]);
   const contraSet = useMemo(() => new Set(bankAccount?.contra_list || []), [bankAccount]);
   const filterSet = useMemo(() => new Set(bankAccount?.filter_list || []), [bankAccount]);
 
@@ -3517,11 +4041,22 @@ const StatementDetailsPage = () => {
           transactions: cluster.transactions.map(tagWithId)
         }));
         
-        setClassificationResult({
+        const initialResult = {
           ...classificationRes.data,
           classified_transactions: taggedClassified,
           unmatched_clusters: taggedClusters
+        };
+        
+        setClassificationResult(initialResult);
+        
+        // Initialize last saved state (without _tempId)
+        const cleanData = taggedClassified.map(({ _tempId, ...rest }) => rest);
+        setLastSavedState({
+          ...initialResult,
+          classified_transactions: cleanData.map(tx => ({ ...tx }))
         });
+        setHasUncommittedChanges(false);
+        setUncommittedChangeCount(0);
 
       } catch (error) {
         toast.error("Failed to load statement details. The record may be incomplete.");
@@ -3532,16 +4067,60 @@ const StatementDetailsPage = () => {
     };
 
     fetchInitialData();
+    
+    // Reset uncommitted changes tracking when statement changes
+    setHasUncommittedChanges(false);
+    setUncommittedChangeCount(0);
+    setLastSavedState(null);
   }, [statementId]);
+
+  // Fetch client statements for navigation
+  useEffect(() => {
+    const fetchClientStatements = async () => {
+      if (!client?.id) return;
+      
+      try {
+        const response = await axios.get(`${API}/clients/${client.id}/statements`);
+        setClientStatements(response.data || []);
+      } catch (error) {
+        console.error("Failed to fetch client statements:", error);
+        setClientStatements([]);
+      }
+    };
+
+    fetchClientStatements();
+  }, [client?.id]);
+
+  // Check data integrity when statement loads
+  useEffect(() => {
+    const checkIntegrity = async () => {
+      if (!statementId) return;
+      
+      try {
+        const response = await axios.get(`${API}/statements/${statementId}/data-integrity-check`);
+        setDataIntegrityCheck(response.data);
+      } catch (error) {
+        console.error("Failed to check data integrity:", error);
+        // Set a default state if check fails
+        setDataIntegrityCheck({ is_match: true, missing_count: 0 });
+      }
+    };
+
+    checkIntegrity();
+  }, [statementId, classificationResult]); // Re-check when classification result changes
 
   useEffect(() => {
     if (!classificationResult || !bankAccount) return; // Wait for bankAccount too
 
-    const allTransactions = [
-      ...classificationResult.classified_transactions,
-      ...classificationResult.unmatched_clusters.flatMap(c => c.transactions)
-    ];
-    const totalCount = allTransactions.length;
+    // Use the backend's total_transactions count, or fallback to classified_transactions length
+    // Note: unmatched_clusters are a subset of classified_transactions, so we should not
+    // count them separately to avoid double-counting
+    const totalCount = classificationResult.total_transactions || classificationResult.classified_transactions?.length || 0;
+    
+    // Use only classified_transactions for calculations - unmatched_clusters are just a grouping
+    // of some of these transactions, not separate transactions
+    const allTransactions = classificationResult.classified_transactions || [];
+    
     if (totalCount === 0) return;
 
     let classifiedCount = 0, hardSuspenseCount = 0, softSuspenseCount = 0;
@@ -3555,6 +4134,7 @@ const StatementDetailsPage = () => {
     const contraList = new Set(bankAccount.contra_list || []);
     const filterList = new Set(bankAccount.filter_list || []);
 
+    // Process all transactions for calculations
     for (const tx of allTransactions) {
         const isCredit = (tx['CR/DR'] || '').startsWith('CR');
         const amount = parseFloat(String(tx.Amount || '0').replace(/,/g, ''));
@@ -3621,10 +4201,8 @@ const StatementDetailsPage = () => {
 const statementPeriod = useMemo(() => {
     if (!classificationResult) return null;
 
-    const allTransactions = [
-      ...classificationResult.classified_transactions,
-      ...classificationResult.unmatched_clusters.flatMap(c => c.transactions)
-    ];
+    // Use only classified_transactions - unmatched_clusters are a subset
+    const allTransactions = classificationResult.classified_transactions || [];
 
     const dates = allTransactions
       .map(tx => tx.Date ? new Date(tx.Date.split('/').reverse().join('-')) : null)
@@ -3704,12 +4282,14 @@ const statementPeriod = useMemo(() => {
     // 1. Optimistically update the UI so it feels instant
     setClassificationResult(newResult);
     
-    // 2. Persist the changes to the database
-    await saveClassificationState(newResult);
+    // 2. Mark as having uncommitted changes (user can save manually)
+    const comparison = compareWithSavedState(newResult);
+    setHasUncommittedChanges(comparison.hasChanges);
+    setUncommittedChangeCount(comparison.count);
     
     // 3. Clean up the selection and notify the user
     setSelectedTxIds(new Set());
-    toast.success(`${selectedTxIds.size} transaction(s) have been updated.`);
+    toast.success(`${selectedTxIds.size} transaction(s) have been updated. Click "Save Changes" to commit to database.`);
   };
 
   const handleBulkReclassify = async () => {
@@ -3743,11 +4323,15 @@ const statementPeriod = useMemo(() => {
 
       // 4. Optimistically update the UI and persist the new state
       setClassificationResult(newResult);
-      await saveClassificationState(newResult);
       
-      // 5. Clean up and notify
+      // 5. Mark as having uncommitted changes (user can save manually)
+      const comparison = compareWithSavedState(newResult);
+      setHasUncommittedChanges(comparison.hasChanges);
+      setUncommittedChangeCount(comparison.count);
+      
+      // 6. Clean up and notify
       setSelectedTxIds(new Set());
-      toast.success(`${reclassifiedResults.length} transaction(s) were re-classified and saved.`);
+      toast.success(`${reclassifiedResults.length} transaction(s) were re-classified. Click "Save Changes" to commit to database.`);
 
     } catch (error) {
       toast.error("Failed to re-classify transactions.");
@@ -3785,14 +4369,34 @@ const statementPeriod = useMemo(() => {
         transactions: cluster.transactions.map(tagWithId)
       }));
 
-      setClassificationResult({
+      const newResult = {
         ...response.data,
         classified_transactions: taggedClassified,
         unmatched_clusters: taggedClusters
-      });
+      };
+      
+      setClassificationResult(newResult);
       
       if (isForced) {
         setDetachedTransactions([]); // Clear detached items on a forced re-classify
+        
+        // Compare the new result with the last saved state to determine if there are changes
+        // Since re-classify changes aren't committed to DB, we need to check for differences
+        const comparison = compareWithSavedState(newResult);
+        setHasUncommittedChanges(comparison.hasChanges);
+        setUncommittedChangeCount(comparison.count);
+        
+        // Don't update lastSavedState since changes aren't committed to DB
+        // This way, the comparison will correctly detect that there are uncommitted changes
+      } else {
+        // For initial classification, set as saved state
+        const cleanData = taggedClassified.map(({ _tempId, ...rest }) => rest);
+        setLastSavedState({
+          ...newResult,
+          classified_transactions: cleanData.map(tx => ({ ...tx }))
+        });
+        setHasUncommittedChanges(false);
+        setUncommittedChangeCount(0);
       }
 
     } catch (error) {
@@ -3801,6 +4405,76 @@ const statementPeriod = useMemo(() => {
       setClassifying(false);
     }
   }, [statementId, statement]);
+
+  // Helper function to compare current state with last saved state
+  const compareWithSavedState = useCallback((currentResult) => {
+    if (!currentResult || !lastSavedState) {
+      return { hasChanges: false, count: 0 };
+    }
+
+    const current = currentResult.classified_transactions || [];
+    const saved = lastSavedState.classified_transactions || [];
+
+    // Create maps for comparison using canonical keys (narration + date + amount)
+    const createKey = (tx) => {
+      const narration = String(tx.Narration || '').trim().toLowerCase();
+      const date = String(tx.Date || '').split(' ')[0].trim();
+      const amount = String(tx.Amount || '0').replace(/,/g, '').trim();
+      return `${narration}||${date}||${amount}`;
+    };
+
+    const currentMap = new Map();
+    current.forEach(tx => {
+      const key = createKey(tx);
+      currentMap.set(key, {
+        matched_ledger: tx.matched_ledger,
+        user_confirmed: tx.user_confirmed
+      });
+    });
+
+    const savedMap = new Map();
+    saved.forEach(tx => {
+      const key = createKey(tx);
+      savedMap.set(key, {
+        matched_ledger: tx.matched_ledger,
+        user_confirmed: tx.user_confirmed
+      });
+    });
+
+    let changeCount = 0;
+
+    // Check for changes in existing transactions
+    savedMap.forEach((savedTx, key) => {
+      const currentTx = currentMap.get(key);
+      if (currentTx) {
+        if (currentTx.matched_ledger !== savedTx.matched_ledger ||
+            currentTx.user_confirmed !== savedTx.user_confirmed) {
+          changeCount++;
+        }
+      }
+    });
+
+    // Check for new transactions
+    currentMap.forEach((currentTx, key) => {
+      if (!savedMap.has(key)) {
+        changeCount++;
+      }
+    });
+
+    return {
+      hasChanges: changeCount > 0,
+      count: changeCount
+    };
+  }, [lastSavedState]);
+
+  // Track uncommitted changes when classificationResult changes
+  useEffect(() => {
+    if (!classificationResult || !lastSavedState) return;
+    
+    const comparison = compareWithSavedState(classificationResult);
+    setHasUncommittedChanges(comparison.hasChanges);
+    setUncommittedChangeCount(comparison.count);
+  }, [classificationResult, lastSavedState, compareWithSavedState]);
 
   const saveClassificationState = async (resultToSave) => {
     if (!resultToSave) return;
@@ -3812,8 +4486,19 @@ const statementPeriod = useMemo(() => {
       await axios.post(`${API}/statements/${statementId}/update-transactions`, {
         processed_data: cleanData,
       });
+      
+      // On successful save, clear uncommitted changes flag and update last saved state
+      setHasUncommittedChanges(false);
+      setUncommittedChangeCount(0);
+      // Store a deep copy of the saved state (without _tempId)
+      setLastSavedState({
+        ...resultToSave,
+        classified_transactions: cleanData.map(tx => ({ ...tx }))
+      });
     } catch (error) {
       toast.error("Failed to save progress.");
+      // Keep the flag set if save fails
+      throw error;
     }
   };
 
@@ -3869,14 +4554,12 @@ const statementPeriod = useMemo(() => {
     // Optimistic UI update
     setClassificationResult(newResult);
 
-    // Persist the exact same new state to backend
-    try {
-      await saveClassificationState(newResult);
-      toast.success(`${transactionsToMark.length} transaction(s) marked as Suspense.`);
-    } catch (err) {
-      toast.error('Failed to save Suspense changes. Changes may not be persisted.');
-      console.error('saveClassificationState error:', err);
-    }
+    // Mark as having uncommitted changes (user can save manually)
+    const comparison = compareWithSavedState(newResult);
+    setHasUncommittedChanges(comparison.hasChanges);
+    setUncommittedChangeCount(comparison.count);
+    
+    toast.success(`${transactionsToMark.length} transaction(s) marked as Suspense. Click "Save Changes" to commit to database.`);
   };
 
   // --- ADD THIS NEW FUNCTION ---
@@ -3961,13 +4644,15 @@ const statementPeriod = useMemo(() => {
     setClassificationResult(optimisticResult);
 
     try {
-      // Persist the update (ensures backend updates existing entry to Suspense without user_confirmed)
-      await saveClassificationState(saveResult);
+      // Mark as having uncommitted changes (user can save manually)
+      const comparison = compareWithSavedState(saveResult);
+      setHasUncommittedChanges(comparison.hasChanges);
+      setUncommittedChangeCount(comparison.count);
 
       // Re-run classification on server to rebuild clusters correctly
       await runClassification();
 
-      toast.success('Marked as incorrect and returned to unclassified clusters.');
+      toast.success('Marked as incorrect and returned to unclassified clusters. Click "Save Changes" to commit to database.');
     } catch (err) {
       console.error('handleFlagAsIncorrect error:', err);
       // Revert UI on failure
@@ -3977,7 +4662,100 @@ const statementPeriod = useMemo(() => {
   };
 
   // --- ADD THIS ENTIRE FUNCTION ---
+  const handleSaveChanges = async () => {
+    if (!classificationResult || !hasUncommittedChanges) {
+      return;
+    }
+
+    setClassifying(true);
+    try {
+      await saveClassificationState(classificationResult);
+      toast.success(`Successfully saved ${uncommittedChangeCount} change(s) to database.`);
+    } catch (error) {
+      toast.error("Failed to save changes. Please try again.");
+      console.error("Save changes error:", error);
+    } finally {
+      setClassifying(false);
+    }
+  };
+
+  const handleRebuildMissingTransactions = async () => {
+    setRebuilding(true);
+    try {
+      const response = await axios.post(
+        `${API}/statements/${statementId}/rebuild-missing-transactions`,
+        rebuildOptions
+      );
+      
+      // Build success message from response
+      const messages = [];
+      if (response.data.updated_count > 0) {
+        messages.push(`Updated ${response.data.updated_count} row(s)`);
+      }
+      if (response.data.added_count > 0) {
+        messages.push(`Added ${response.data.added_count} row(s)`);
+      }
+      if (response.data.removed_count > 0) {
+        messages.push(`Removed ${response.data.removed_count} row(s)`);
+      }
+      
+      if (messages.length > 0) {
+        toast.success(messages.join(', '));
+      } else {
+        toast.success(response.data.message);
+      }
+      
+      // Refresh data integrity check
+      const integrityResponse = await axios.get(`${API}/statements/${statementId}/data-integrity-check`);
+      setDataIntegrityCheck(integrityResponse.data);
+      
+      // Refresh classification result
+      await runClassification(true);
+      
+      setShowRebuildModal(false);
+    } catch (error) {
+      toast.error("Failed to fix data integrity issues. Please try again.");
+      console.error("Rebuild error:", error);
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  const handleRebuildAndProceed = async () => {
+    setRebuilding(true);
+    try {
+      const response = await axios.post(`${API}/statements/${statementId}/rebuild-missing-transactions`);
+      toast.success(response.data.message);
+      
+      // Refresh data integrity check
+      const integrityResponse = await axios.get(`${API}/statements/${statementId}/data-integrity-check`);
+      setDataIntegrityCheck(integrityResponse.data);
+      
+      // Refresh classification result
+      await runClassification(true);
+      
+      // After rebuild, proceed with voucher generation
+      await proceedWithVoucherGeneration();
+    } catch (error) {
+      toast.error("Failed to rebuild transactions.");
+      console.error("Rebuild error:", error);
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
   const handleGenerateVouchers = async () => {
+    // Check data integrity first
+    if (dataIntegrityCheck && !dataIntegrityCheck.is_match) {
+      setShowVoucherConfirmation(true);
+      return;
+    }
+    
+    // Proceed with normal flow if no mismatch
+    await proceedWithVoucherGeneration();
+  };
+
+  const proceedWithVoucherGeneration = async () => {
     setClassifying(true);
     try {
       // Step 1: Always save the latest state before generating.
@@ -3989,9 +4767,32 @@ const statementPeriod = useMemo(() => {
       setIsVoucherModalOpen(true); // Open the modal
       
     } catch (error) {
-      toast.error("Could not prepare voucher data. Please try again.");
+      if (error.response?.status === 400 && error.response?.data?.detail?.includes("Data integrity check failed")) {
+        toast.error(error.response.data.detail);
+        // Refresh integrity check
+        const integrityResponse = await axios.get(`${API}/statements/${statementId}/data-integrity-check`);
+        setDataIntegrityCheck(integrityResponse.data);
+      } else {
+        toast.error("Could not prepare voucher data. Please try again.");
+      }
     } finally {
       setClassifying(false);
+    }
+  };
+
+  const handleVoucherConfirmationChoice = async (choice) => {
+    setShowVoucherConfirmation(false);
+    
+    if (choice === 'cancel') {
+      return;
+    }
+    
+    if (choice === 'rebuild') {
+      // Rebuild missing transactions first, then proceed
+      await handleRebuildAndProceed();
+    } else if (choice === 'proceed') {
+      // Proceed anyway
+      await proceedWithVoucherGeneration();
     }
   };
 
@@ -4019,8 +4820,280 @@ const statementPeriod = useMemo(() => {
   const isAllSelected = classifiedTxnsToShow.length > 0 && selectedTxIds.size === classifiedTxnsToShow.length;
   // --- END OF FIX ---
   
+  // Helper function to format currency
+  const formatCurrency = (amount) => {
+    if (amount === null || typeof amount === 'undefined') return '';
+    const cleanedAmount = String(amount).replace(/,/g, '');
+    const num = Number(cleanedAmount);
+    return isNaN(num) ? '' : `₹${num.toLocaleString('en-IN')}`;
+  };
+
+  // Helper function to get field value from raw transaction
+  const getRawFieldValue = (tx, mappingKey) => {
+    if (!statement?.column_mapping) return '';
+    const mappedColumn = statement.column_mapping[mappingKey];
+    if (mappedColumn && tx[mappedColumn] !== undefined) {
+      return tx[mappedColumn];
+    }
+    // Fallback: try common field name variations
+    const fallbackKeys = [
+      mappingKey.replace('_column', ''),
+      mappingKey.replace('_column', '').toLowerCase(),
+      mappingKey.replace('_column', '').toUpperCase(),
+    ];
+    for (const key of fallbackKeys) {
+      if (tx[key] !== undefined) return tx[key];
+    }
+    return '';
+  };
+  
   return (
     <div className="space-y-8">
+      {/* Enhanced Rebuild Missing Transactions Modal */}
+      <Dialog open={showRebuildModal} onOpenChange={setShowRebuildModal}>
+        <DialogContent className="max-w-5xl max-h-[85vh]">
+          <DialogHeader>
+            <DialogTitle>Fix Data Integrity Issues</DialogTitle>
+            <DialogDescription>
+              Review and fix data integrity issues detected between raw and processed data.
+            </DialogDescription>
+          </DialogHeader>
+          
+          {/* User Choice Checkboxes */}
+          <div className="space-y-3 p-4 bg-slate-50 rounded-lg border">
+            <div className="flex items-center space-x-2">
+              <Checkbox 
+                id="update-partial" 
+                checked={rebuildOptions.update_partial_loss}
+                disabled={!dataIntegrityCheck?.partial_data_loss_count}
+                onCheckedChange={(checked) => 
+                  setRebuildOptions(prev => ({ ...prev, update_partial_loss: !!checked }))
+                }
+              />
+              <Label htmlFor="update-partial" className="text-sm font-medium cursor-pointer">
+                Update existing rows with missing fields ({dataIntegrityCheck?.partial_data_loss_count || 0} rows)
+              </Label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox 
+                id="add-missing" 
+                checked={rebuildOptions.add_missing_rows}
+                disabled={!dataIntegrityCheck?.missing_rows_count}
+                onCheckedChange={(checked) => 
+                  setRebuildOptions(prev => ({ ...prev, add_missing_rows: !!checked }))
+                }
+              />
+              <Label htmlFor="add-missing" className="text-sm font-medium cursor-pointer">
+                Add completely missing rows ({dataIntegrityCheck?.missing_rows_count || 0} rows)
+              </Label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox 
+                id="remove-extra" 
+                checked={rebuildOptions.remove_extra_transactions}
+                disabled={!dataIntegrityCheck?.extra_transactions_count}
+                onCheckedChange={(checked) => 
+                  setRebuildOptions(prev => ({ ...prev, remove_extra_transactions: !!checked }))
+                }
+              />
+              <Label htmlFor="remove-extra" className="text-sm font-medium cursor-pointer">
+                Remove extra transactions ({dataIntegrityCheck?.extra_transactions_count || 0} rows) - Optional
+              </Label>
+            </div>
+          </div>
+
+          {/* Tabs for different issue types */}
+          <Tabs defaultValue="missing" className="w-full">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="missing" disabled={!dataIntegrityCheck?.missing_rows_count}>
+                Missing Rows ({dataIntegrityCheck?.missing_rows_count || 0})
+              </TabsTrigger>
+              <TabsTrigger value="partial" disabled={!dataIntegrityCheck?.partial_data_loss_count}>
+                Partial Loss ({dataIntegrityCheck?.partial_data_loss_count || 0})
+              </TabsTrigger>
+              <TabsTrigger value="extra" disabled={!dataIntegrityCheck?.extra_transactions_count}>
+                Extra ({dataIntegrityCheck?.extra_transactions_count || 0})
+              </TabsTrigger>
+            </TabsList>
+            
+            {/* Missing Rows Tab */}
+            <TabsContent value="missing" className="mt-4">
+              <ScrollArea className="max-h-[50vh]">
+                {dataIntegrityCheck?.missing_rows && dataIntegrityCheck.missing_rows.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Narration</TableHead>
+                        <TableHead>Amount</TableHead>
+                        <TableHead>CR/DR</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dataIntegrityCheck.missing_rows.map((tx, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell>{getRawFieldValue(tx, 'date_column') || 'N/A'}</TableCell>
+                          <TableCell className="max-w-md truncate">{getRawFieldValue(tx, 'narration_column') || 'N/A'}</TableCell>
+                          <TableCell>{formatCurrency(getRawFieldValue(tx, 'amount_column'))}</TableCell>
+                          <TableCell>{getRawFieldValue(tx, 'crdr_column') || 'N/A'}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <p className="text-center text-slate-500 py-4">No missing rows found.</p>
+                )}
+              </ScrollArea>
+            </TabsContent>
+            
+            {/* Partial Data Loss Tab */}
+            <TabsContent value="partial" className="mt-4">
+              <ScrollArea className="max-h-[50vh]">
+                {dataIntegrityCheck?.partial_data_loss && dataIntegrityCheck.partial_data_loss.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Narration</TableHead>
+                        <TableHead>Amount</TableHead>
+                        <TableHead>Missing Fields</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dataIntegrityCheck.partial_data_loss.map((item, idx) => {
+                        const processed = item.processed_tx || {};
+                        const raw = item.raw_tx || {};
+                        return (
+                          <TableRow key={idx}>
+                            <TableCell>{processed.Date || getRawFieldValue(raw, 'date_column') || 'N/A'}</TableCell>
+                            <TableCell className="max-w-md truncate">{processed.Narration || getRawFieldValue(raw, 'narration_column') || 'N/A'}</TableCell>
+                            <TableCell>{formatCurrency(processed.Amount || getRawFieldValue(raw, 'amount_column'))}</TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1">
+                                {item.missing_fields?.map((field, fIdx) => (
+                                  <Badge key={fIdx} variant="destructive" className="text-xs">
+                                    {field}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <p className="text-center text-slate-500 py-4">No partial data loss found.</p>
+                )}
+              </ScrollArea>
+            </TabsContent>
+            
+            {/* Extra Transactions Tab */}
+            <TabsContent value="extra" className="mt-4">
+              <ScrollArea className="max-h-[50vh]">
+                {dataIntegrityCheck?.extra_transactions && dataIntegrityCheck.extra_transactions.length > 0 ? (
+                  <>
+                    <div className="mb-3 p-2 bg-orange-50 border border-orange-200 rounded text-xs text-orange-800">
+                      These transactions exist in processed data but not in raw data. They may have been added manually.
+                    </div>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Date</TableHead>
+                          <TableHead>Narration</TableHead>
+                          <TableHead>Amount</TableHead>
+                          <TableHead>CR/DR</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {dataIntegrityCheck.extra_transactions.map((tx, idx) => (
+                          <TableRow key={idx}>
+                            <TableCell>{tx.Date || 'N/A'}</TableCell>
+                            <TableCell className="max-w-md truncate">{tx.Narration || 'N/A'}</TableCell>
+                            <TableCell>{formatCurrency(tx.Amount)}</TableCell>
+                            <TableCell>{tx['CR/DR'] || 'N/A'}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </>
+                ) : (
+                  <p className="text-center text-slate-500 py-4">No extra transactions found.</p>
+                )}
+              </ScrollArea>
+            </TabsContent>
+          </Tabs>
+          
+          <div className="flex justify-end gap-4 pt-4 border-t">
+            <Button variant="outline" onClick={() => setShowRebuildModal(false)} disabled={rebuilding}>
+              Cancel
+            </Button>
+            <Button onClick={handleRebuildMissingTransactions} disabled={rebuilding}>
+              {rebuilding ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Fixing...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Fix Data Integrity Issues
+                </>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Voucher Generation Confirmation Dialog */}
+      <AlertDialog open={showVoucherConfirmation} onOpenChange={setShowVoucherConfirmation}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-600" />
+              Data Integrity Warning
+            </AlertDialogTitle>
+            <AlertDialogDescription className="pt-2">
+              <p className="mb-3">
+                <strong>{dataIntegrityCheck?.missing_count || 0} transaction(s)</strong> are missing from processed data. 
+                Generating vouchers with incomplete data may cause accounting discrepancies.
+              </p>
+              <p className="text-sm text-slate-600">
+                Raw data has {dataIntegrityCheck?.raw_data_count || 0} transactions, but processed data only has {dataIntegrityCheck?.processed_data_count || 0}.
+              </p>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => handleVoucherConfirmationChoice('cancel')}>
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              variant="outline"
+              onClick={() => handleVoucherConfirmationChoice('rebuild')}
+              disabled={rebuilding}
+              className="bg-yellow-50 hover:bg-yellow-100 border-yellow-300"
+            >
+              {rebuilding ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Rebuilding...
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Rebuild Missing First
+                </>
+              )}
+            </Button>
+            <Button
+              onClick={() => handleVoucherConfirmationChoice('proceed')}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              Proceed Anyway
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {/* --- START OF ADDITION (3 of 3): Render the new header --- */}
       <StatementPageHeader
         client={client}
@@ -4028,6 +5101,10 @@ const statementPeriod = useMemo(() => {
         statement={statement}
         stats={pageStats}
         statementPeriod={statementPeriod}
+        dataIntegrityCheck={dataIntegrityCheck}
+        onRebuildClick={() => setShowRebuildModal(true)}
+        clientStatements={clientStatements}
+        currentStatementId={statementId}
       />
       {/* --- END OF ADDITION (3 of 3) --- */}
       <div className="flex justify-between items-center">
@@ -4041,6 +5118,24 @@ const statementPeriod = useMemo(() => {
           <Button onClick={handleGenerateVouchers} disabled={classifying} className="bg-blue-600 hover:bg-blue-700">
             <Download className="w-4 h-4 mr-2" />
             Generate Vouchers
+          </Button>
+          <Button 
+            onClick={handleSaveChanges} 
+            disabled={classifying || !hasUncommittedChanges}
+            className={hasUncommittedChanges ? "bg-green-600 hover:bg-green-700" : "bg-slate-400 cursor-not-allowed"}
+            title={hasUncommittedChanges ? `Save ${uncommittedChangeCount} unsaved change(s)` : "All changes saved"}
+          >
+            {hasUncommittedChanges ? (
+              <>
+                <Save className="w-4 h-4 mr-2" />
+                Save {uncommittedChangeCount} change{uncommittedChangeCount !== 1 ? 's' : ''}
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="w-4 h-4 mr-2" />
+                All saved
+              </>
+            )}
           </Button>
           <Button onClick={() => runClassification(true)} disabled={classifying}>
             <RefreshCw className={`w-4 h-4 mr-2 ${classifying ? 'animate-spin' : ''}`} />

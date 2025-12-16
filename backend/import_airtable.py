@@ -2,12 +2,35 @@ import os
 import csv
 import json
 import asyncio
+import re
+from typing import Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 # Import our existing models so we can create LedgerRule objects
 import models
+
+# --- ADD REGEX VALIDATION HELPER FUNCTION ---
+def validate_regex_pattern(pattern: str) -> Tuple[bool, str]:
+    """
+    Validates a regex pattern to ensure it's compatible with Python's re module.
+    Returns (is_valid, error_message).
+    """
+    if not pattern or not pattern.strip():
+        return False, "Regex pattern cannot be empty"
+    
+    try:
+        # Try to compile the pattern to catch syntax errors
+        re.compile(pattern)
+        # Test with a simple search on empty string to catch runtime issues
+        re.search(pattern, "")
+        return True, ""
+    except re.error as e:
+        return False, f"Invalid regex pattern: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error validating regex: {str(e)}"
+# --- END OF VALIDATION HELPER ---
 
 # --- CONFIGURATION: PLEASE EDIT THIS ---
 # 1. Make sure your CSV file is in the 'backend' directory, or provide the full path.
@@ -66,11 +89,18 @@ async def main():
                         if narration_text and narration_text.strip():
                             sample_narrations.append(narration_text.strip())
                     
-                    # 7. Create the SQLAlchemy object for the new rule
+                    # 7. VALIDATE REGEX PATTERN BEFORE ADDING
+                    regex_pattern = row.get('Regex')
+                    is_valid, error_message = validate_regex_pattern(regex_pattern)
+                    if not is_valid:
+                        print(f"WARNING: Skipping rule for ledger '{row.get('Ledger name')}' - {error_message}")
+                        continue
+                    
+                    # 8. Create the SQLAlchemy object for the new rule
                     new_rule = models.LedgerRule(
                         client_id=client_id,
                         ledger_name=row.get('Ledger name'),
-                        regex_pattern=row.get('Regex'),
+                        regex_pattern=regex_pattern,
                         sample_narrations=sample_narrations # The combined list
                     )
                     rules_to_add.append(new_rule)

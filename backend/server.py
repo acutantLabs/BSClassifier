@@ -212,13 +212,18 @@ class ColumnMapping(BaseModel):
     balance_column: Optional[str] = None
     crdr_column: Optional[str] = None
     statement_format: str
+    filtered_columns: Optional[List[str]] = []  # Columns to filter out from raw_data
 
 class FileUploadResponse(BaseModel):
     file_id: str
     filename: str
     headers: List[str]
     preview_data: List[Dict]
+    last_rows_data: List[Dict] = []  # Last 5 rows for preview
     suggested_mapping: Dict[str, str]
+    problematic_rows: List[Dict] = []
+    total_rows: int = 0
+    problematic_row_indices: List[int] = []
 
 class TransactionCluster(BaseModel):
     cluster_id: str
@@ -377,8 +382,45 @@ def detect_narration_columns(headers: List[str]) -> List[str]:
 
 def detect_amount_columns(headers: List[str]) -> List[str]:
     """Detect potential amount columns"""
-    amount_keywords = ['amount', 'amt', 'value', 'debit', 'credit', 'dr', 'cr', 'balance', 'bal']
-    return [h for h in headers if any(keyword in h.lower() for keyword in amount_keywords)]
+    # Priority keywords - columns containing these will be prioritized
+    priority_keywords = [
+        'transaction amount',
+        'transactionamount',
+        'txn amount',
+        'txnamount',
+        'amount',
+        'amt'
+    ]
+    
+    # Secondary keywords - checked after priority keywords
+    secondary_keywords = ['value', 'debit', 'credit', 'dr', 'cr', 'balance', 'bal']
+    
+    priority_matches = []
+    secondary_matches = []
+    date_matches = []  # Columns containing 'date' - lowest priority
+    
+    for h in headers:
+        h_lower = h.lower()
+        
+        # Skip columns that contain 'date' - they should be deprioritized
+        if 'date' in h_lower:
+            # Still check if they match amount keywords, but put them in lowest priority
+            if any(keyword in h_lower for keyword in priority_keywords + secondary_keywords):
+                date_matches.append(h)
+            continue
+        
+        # Check priority keywords first
+        for keyword in priority_keywords:
+            if keyword in h_lower:
+                priority_matches.append(h)
+                break
+        else:
+            # Only check secondary keywords if no priority match found
+            if any(keyword in h_lower for keyword in secondary_keywords):
+                secondary_matches.append(h)
+    
+    # Return priority matches first, then secondary matches, then date matches last
+    return priority_matches + secondary_matches + date_matches
 
 def suggest_column_mapping(headers: List[str]) -> Dict[str, str]:
     """Suggest column mapping based on headers"""
@@ -471,6 +513,27 @@ async def get_dashboard_stats(db: AsyncSession = Depends(database.get_db)):
         success_rate=round(success_rate, 2)
     )
 # --- END OF REPLACEMENT ---
+# --- ADD REGEX VALIDATION HELPER FUNCTION ---
+def validate_regex_pattern(pattern: str) -> Tuple[bool, str]:
+    """
+    Validates a regex pattern to ensure it's compatible with Python's re module.
+    Returns (is_valid, error_message).
+    """
+    if not pattern or not pattern.strip():
+        return False, "Regex pattern cannot be empty"
+    
+    try:
+        # Try to compile the pattern to catch syntax errors
+        re.compile(pattern)
+        # Test with a simple search on empty string to catch runtime issues
+        re.search(pattern, "")
+        return True, ""
+    except re.error as e:
+        return False, f"Invalid regex pattern: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected error validating regex: {str(e)}"
+# --- END OF VALIDATION HELPER ---
+
 # --- REPLACEMENT for generate_regex_from_narrations ---
 async def generate_regex_from_narrations(narrations: List[str], db: AsyncSession) -> str:
     """
@@ -944,10 +1007,44 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
         # 2. Convert the entire clean DataFrame into a list of standard Python objects.
         # This is the key step that correctly converts numpy.int64 -> int, etc.
         sanitized_records = df.to_dict('records')
+        
+        # #region agent log
+        with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "validation", "location": "server.py:967", "message": "after sanitizing records", "data": {"record_count": len(sanitized_records), "sample_record_keys": list(sanitized_records[0].keys())[:10] if sanitized_records else []}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+        # #endregion
 
         headers = df.columns.tolist()
         preview_data = sanitized_records[:10] # Use the sanitized records for the preview
+        # Get last 5 rows for preview (if there are more than 10 rows total)
+        last_rows_data = []
+        if len(sanitized_records) > 10:
+            last_rows_data = sanitized_records[-5:]
         suggested_mapping = suggest_column_mapping(headers)
+        
+        # Scan for problematic rows immediately using suggested mapping
+        problematic_rows = []
+        problematic_row_indices = []
+        
+        if suggested_mapping:
+            # Create a mapping dict for validation
+            mapping_dict = {
+                "date_column": suggested_mapping.get("date_column"),
+                "narration_column": suggested_mapping.get("narration_column"),
+                "amount_column": suggested_mapping.get("amount_column"),
+                "credit_column": suggested_mapping.get("credit_column"),
+                "debit_column": suggested_mapping.get("debit_column"),
+                "statement_format": suggested_mapping.get("statement_format", "single_amount_crdr")
+            }
+            
+            # Validate all rows using suggested mapping
+            is_valid, error_msg, invalid_row_idx, problematic_rows_list = validate_transaction_data(
+                sanitized_records, mapping_dict, return_all_problems=True
+            )
+            
+            if problematic_rows_list:
+                problematic_rows = problematic_rows_list
+                problematic_row_indices = [row["row_index"] for row in problematic_rows_list]
+                logging.info(f"Found {len(problematic_rows)} problematic rows during upload scan")
         
         # Store the sanitized data temporarily in the new table
         temp_file = models.TempFile(
@@ -965,7 +1062,11 @@ async def upload_statement(file: UploadFile = File(...), db: AsyncSession = Depe
             filename=file.filename,
             headers=headers,
             preview_data=preview_data,
-            suggested_mapping=suggested_mapping
+            last_rows_data=last_rows_data,
+            suggested_mapping=suggested_mapping,
+            problematic_rows=problematic_rows,
+            total_rows=len(sanitized_records),
+            problematic_row_indices=problematic_row_indices
         )
     
     except Exception as e:
@@ -986,7 +1087,105 @@ def _clean_amount_string(value: Any) -> str:
     # This is a safe way to handle currency symbols, etc.
     s = re.sub(r"[^0-9.-]", "", s)
     return s if s else "0"
-# --- ADD THIS HELPER FUNCTION ---
+
+def validate_transaction_data(transactions: List[Dict], mapping: Dict, required_fields: List[str] = None, return_all_problems: bool = False) -> Tuple[bool, Optional[str], Optional[int], Optional[List[Dict]]]:
+    """
+    Validates transaction data to ensure all required fields are present and non-None.
+    
+    Args:
+        transactions: List of transaction dictionaries
+        mapping: Column mapping dictionary
+        required_fields: List of standardized field names to check (e.g., ['Narration', 'Date', 'Amount'])
+                        If None, checks based on mapping type
+        return_all_problems: If True, returns list of all problematic rows instead of stopping at first
+    
+    Returns:
+        Tuple of (is_valid, error_message, row_index, problematic_rows)
+        - is_valid: True if all rows are valid
+        - error_message: User-friendly error message if invalid, None if valid
+        - row_index: Index of the first invalid row (0-based), None if valid
+        - problematic_rows: List of dicts with 'row_index', 'row_number', 'missing_fields', 'transaction_data'
+    """
+    if not transactions:
+        return True, None, None, []
+    
+    # Determine required fields based on mapping if not provided
+    if required_fields is None:
+        required_fields = []
+        if mapping.get("date_column"):
+            required_fields.append("Date")
+        if mapping.get("narration_column"):
+            required_fields.append("Narration")
+        if mapping.get("amount_column"):
+            required_fields.append("Amount")
+        elif mapping.get("statement_format") == "separate_credit_debit":
+            required_fields.append("Amount (INR)")
+    
+    problematic_rows = []
+    
+    # Check each transaction
+    for idx, transaction in enumerate(transactions):
+        missing_fields = []
+        
+        for field in required_fields:
+            value = None
+            # For standardized fields, check directly
+            if field in ["Date", "Narration", "Amount", "Amount (INR)", "CR/DR"]:
+                value = transaction.get(field)
+                # If not found as standardized, try raw mapping
+                if value is None:
+                    if field == "Date":
+                        mapped_key = mapping.get("date_column")
+                    elif field == "Narration":
+                        mapped_key = mapping.get("narration_column")
+                    elif field == "Amount":
+                        mapped_key = mapping.get("amount_column")
+                    elif field == "Amount (INR)":
+                        # This is only for normalized data
+                        pass
+                    else:
+                        mapped_key = None
+                    if mapped_key:
+                        value = transaction.get(mapped_key)
+            else:
+                # For raw fields, check via mapping
+                mapped_key = mapping.get(field.lower() + "_column") or mapping.get(field)
+                value = transaction.get(mapped_key) if mapped_key else None
+            
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                missing_fields.append(field)
+        
+        if missing_fields:
+            row_num = idx + 1  # 1-based for user display
+            problematic_rows.append({
+                "row_index": idx,
+                "row_number": row_num,
+                "missing_fields": missing_fields,
+                "transaction_data": {k: str(v)[:100] if v is not None else None for k, v in list(transaction.items())[:10]}  # Limit data size
+            })
+            
+            if not return_all_problems:
+                # Return first problematic row (backward compatible)
+                fields_str = ", ".join(missing_fields)
+                error_msg = (
+                    f"Row {row_num} in the statement is incomplete. "
+                    f"Missing or empty required fields: {fields_str}. "
+                    f"Please check the statement file and ensure all rows have complete data. "
+                    f"If the issue persists, please report this to the administrator."
+                )
+                return False, error_msg, idx, problematic_rows
+    
+    if problematic_rows:
+        # If we found problems but return_all_problems was True, create summary message
+        fields_str = ", ".join(required_fields)
+        error_msg = (
+            f"Found {len(problematic_rows)} row(s) with missing or empty required fields ({fields_str}). "
+            f"Please review and choose to filter them out or fix the data."
+        )
+        return False, error_msg, problematic_rows[0]["row_index"], problematic_rows
+    
+    return True, None, None, []
+# --- END OF ADDITION ---
 
 def normalize_transaction_data(
     raw_data: List[Dict], mapping: "ColumnMapping"
@@ -1092,8 +1291,51 @@ async def reclassify_subset(
     return reclassified_transactions
 
 # --- REPLACEMENT for confirm_column_mapping ---
+@api_router.post("/validate-mapping/{file_id}")
+async def validate_column_mapping(file_id: str, mapping: ColumnMapping, db: AsyncSession = Depends(database.get_db)):
+    """Validate column mapping and return problematic rows"""
+    temp_file = await db.get(models.TempFile, file_id)
+    if not temp_file:
+        raise HTTPException(status_code=404, detail="File not found or has expired")
+
+    try:
+        mapping_dict = mapping.dict()
+        
+        # Validate raw data and get all problematic rows
+        is_valid, error_msg, invalid_row_idx, problematic_rows = validate_transaction_data(
+            temp_file.raw_data, mapping_dict, return_all_problems=True
+        )
+        
+        if is_valid:
+            return {
+                "is_valid": True,
+                "problematic_rows": [],
+                "total_rows": len(temp_file.raw_data),
+                "valid_rows": len(temp_file.raw_data)
+            }
+        
+        # Return problematic rows information
+        return {
+            "is_valid": False,
+            "problematic_rows": problematic_rows,
+            "total_rows": len(temp_file.raw_data),
+            "valid_rows": len(temp_file.raw_data) - len(problematic_rows),
+            "error_message": error_msg
+        }
+    
+    except Exception as e:
+        logging.error(f"Validation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error validating mapping: {str(e)}")
+
 @api_router.post("/confirm-mapping/{file_id}")
-async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id: str = Query(...), bank_account_id: str = Query(...), db: AsyncSession = Depends(database.get_db)):
+async def confirm_column_mapping(
+    file_id: str, 
+    mapping: ColumnMapping, 
+    client_id: str = Query(...), 
+    bank_account_id: str = Query(...),
+    filter_problematic_rows: bool = Query(False, description="Filter out problematic rows before processing"),
+    db: AsyncSession = Depends(database.get_db)
+):
     """Confirm column mapping and process statement"""
     temp_file = await db.get(models.TempFile, file_id)
     if not temp_file:
@@ -1101,18 +1343,56 @@ async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id
 
     try:
         # --- START OF NEW LOGIC ---
-        # Normalize the data before creating the statement object
-        processed_raw_data = normalize_transaction_data(temp_file.raw_data, mapping)
+        mapping_dict = mapping.dict()
         
-        # If normalization occurred, we need to update the column mapping
-        # to reflect the new standardized column names.
-        final_mapping = mapping.dict()
+        # Get problematic rows if filtering is requested
+        problematic_row_indices = set()
+        if filter_problematic_rows:
+            is_valid, error_msg, invalid_row_idx, problematic_rows = validate_transaction_data(
+                temp_file.raw_data, mapping_dict, return_all_problems=True
+            )
+            if problematic_rows:
+                problematic_row_indices = {row["row_index"] for row in problematic_rows}
+                logging.info(f"Filtering out {len(problematic_row_indices)} problematic rows")
+        
+        # Filter out problematic rows if requested
+        raw_data_to_process = temp_file.raw_data
+        if problematic_row_indices:
+            raw_data_to_process = [
+                row for idx, row in enumerate(temp_file.raw_data) 
+                if idx not in problematic_row_indices
+            ]
+            logging.info(f"Processed {len(raw_data_to_process)} rows after filtering (removed {len(problematic_row_indices)} problematic rows)")
+        
+        # Filter out user-selected columns from raw_data
+        filtered_columns = mapping.filtered_columns or []
+        if filtered_columns:
+            # Remove filtered columns from each row in raw_data
+            raw_data_to_process = [
+                {k: v for k, v in row.items() if k not in filtered_columns}
+                for row in raw_data_to_process
+            ]
+            logging.info(f"Filtered out {len(filtered_columns)} columns: {', '.join(filtered_columns)}")
+        
+        # Normalize the data before creating the statement object
+        processed_raw_data = normalize_transaction_data(raw_data_to_process, mapping)
+        
+        # Validate normalized data as well (should be valid if we filtered)
+        final_mapping = mapping_dict.copy()
         if mapping.statement_format == "separate_credit_debit":
             final_mapping["amount_column"] = "Amount (INR)"
             final_mapping["crdr_column"] = "CR/DR"
             # Set original columns to None as they no longer exist
             final_mapping["credit_column"] = None
             final_mapping["debit_column"] = None
+        
+        # Only validate if we didn't filter (if we filtered, data should be clean)
+        if not filter_problematic_rows:
+            is_valid, error_msg, invalid_row_idx, _ = validate_transaction_data(processed_raw_data, final_mapping, return_all_problems=False)
+            if not is_valid:
+                await db.rollback()
+                logging.error(f"Invalid normalized transaction data at row {invalid_row_idx}: {error_msg}")
+                raise HTTPException(status_code=400, detail=error_msg)
         # --- END OF NEW LOGIC ---
 
         # Create a permanent BankStatement record
@@ -1130,8 +1410,16 @@ async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id
         await db.commit()
         await db.refresh(statement)
         
-        return {"message": "Statement processed successfully", "statement_id": statement.id}
+        return {
+            "message": "Statement processed successfully", 
+            "statement_id": statement.id,
+            "rows_filtered": len(problematic_row_indices) if filter_problematic_rows else 0,
+            "rows_processed": len(processed_raw_data)
+        }
     
+    except HTTPException:
+        # Re-raise HTTP exceptions (including our validation errors) as-is
+        raise
     except Exception as e:
         await db.rollback()
         logging.error(f"Mapping confirmation error: {e}", exc_info=True)
@@ -1142,6 +1430,12 @@ async def confirm_column_mapping(file_id: str, mapping: ColumnMapping, client_id
 @api_router.post("/ledger-rules", response_model=LedgerRule)
 async def create_ledger_rule(rule_data: LedgerRuleBase, db: AsyncSession = Depends(database.get_db)):
         """Create a new ledger rule"""
+        # --- VALIDATE REGEX PATTERN BEFORE SAVING ---
+        is_valid, error_message = validate_regex_pattern(rule_data.regex_pattern)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_message)
+        # --- END OF VALIDATION ---
+        
         db_rule = models.LedgerRule(**rule_data.dict())
         
         db.add(db_rule)
@@ -1209,7 +1503,14 @@ def create_standardized_transaction(transaction: Dict, mapping: Dict) -> Dict:
         standardized["Date"] = None # Handle cases where the date is missing.
     # --- END: Date Normalization Logic ---
     # Map essential columns using the provided mapping
-    standardized["Narration"] = transaction.get(mapping.get("narration_column"))
+    narration_col_key = mapping.get("narration_column")
+    raw_narration = transaction.get(narration_col_key)
+    # #region agent log
+    with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B,C", "location": "server.py:1331", "message": "creating standardized Narration", "data": {"narration_col_key": narration_col_key, "raw_narration": raw_narration, "raw_narration_type": str(type(raw_narration)), "transaction_has_key": narration_col_key in transaction if narration_col_key else False, "transaction_keys_sample": list(transaction.keys())[:10]}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+    # #endregion
+    # Ensure Narration is never None - use empty string as fallback
+    standardized["Narration"] = str(raw_narration) if raw_narration is not None else ""
     standardized["Amount"] = transaction.get(mapping.get("amount_column"))
     raw_cr_dr = transaction.get(mapping.get("crdr_column"), "")
     # Clean and normalize it immediately
@@ -1229,6 +1530,12 @@ async def update_ledger_rule(rule_id: str, rule_data: LedgerRuleUpdate, db: Asyn
     db_rule = await db.get(models.LedgerRule, rule_id)
     if not db_rule:
         raise HTTPException(status_code=404, detail="Ledger rule not found")
+    
+    # --- VALIDATE REGEX PATTERN BEFORE UPDATING ---
+    is_valid, error_message = validate_regex_pattern(rule_data.regex_pattern)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_message)
+    # --- END OF VALIDATION ---
     
     # Update the rule object with the new data
     update_data = rule_data.dict()
@@ -1325,21 +1632,55 @@ async def classify_transactions(
     classified_transactions = statement.processed_data if isinstance(statement.processed_data, list) else []
 
     if not classified_transactions: # First run
-        # ... (This entire 'if not classified_transactions' block remains unchanged)
+        # Validate raw_data before processing
+        raw_data = statement.raw_data or []
+        if raw_data:
+            is_valid, error_msg, invalid_row_idx, _ = validate_transaction_data(raw_data, mapping, return_all_problems=False)
+            if not is_valid:
+                logging.error(f"Invalid raw_data during first classification: {error_msg}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_msg
+                )
+        
         query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
         result = await db.execute(query)
         patterns = result.scalars().all()
-        raw_data = statement.raw_data or []
+        # #region agent log
+        with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B,C", "location": "server.py:1475", "message": "first run classification started", "data": {"raw_data_count": len(raw_data), "narration_col": narration_col, "mapping": str(mapping)}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+        # #endregion
         for transaction in raw_data:
             standardized_transaction = create_standardized_transaction(transaction, mapping)
-            narration = str(transaction.get(narration_col, ""))
+            # #region agent log
+            with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B,C", "location": "server.py:1483", "message": "after create_standardized_transaction", "data": {"standardized_narration": standardized_transaction.get("Narration"), "standardized_narration_type": str(type(standardized_transaction.get("Narration"))), "raw_transaction_keys": list(transaction.keys())[:10], "narration_col_value": transaction.get(narration_col) if narration_col else None}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+            # #endregion
+            
+            # Ensure narration is never None - use empty string as fallback
+            narration = standardized_transaction.get("Narration")
+            if narration is None:
+                narration = str(transaction.get(narration_col, "")) if narration_col else ""
+            else:
+                narration = str(narration) if narration else ""
+            
+            # Double-check: if narration is still empty/None after all attempts, skip this transaction
+            if not narration or narration.strip() == "":
+                logging.warning(f"Skipping transaction with empty narration: {transaction}")
+                continue
+            
             matched = False
             for pattern in patterns:
-                if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
-                    standardized_transaction["matched_ledger"] = pattern.ledger_name
-                    classified_transactions.append(standardized_transaction)
-                    matched = True
-                    break
+                try:
+                    if re.search(pattern.regex_pattern, narration, re.IGNORECASE):
+                        standardized_transaction["matched_ledger"] = pattern.ledger_name
+                        classified_transactions.append(standardized_transaction)
+                        matched = True
+                        break
+                except re.error as e:
+                    # Log invalid patterns (shouldn't happen with validation, but keep as safety net)
+                    logging.warning(f"Invalid regex pattern for ledger {pattern.ledger_name} (ID: {pattern.id}): {e}. Pattern: {pattern.regex_pattern[:100]}")
+                    continue
             if not matched:
                 standardized_transaction["matched_ledger"] = "Suspense"
                 classified_transactions.append(standardized_transaction)
@@ -1348,18 +1689,75 @@ async def classify_transactions(
         await db.refresh(statement)
 
     if force_reclassify: # Intelligent Merge
-        # ... (This entire 'if force_reclassify' block remains unchanged)
+        # Validate processed_data before reclassification
+        if classified_transactions:
+            is_valid, error_msg, invalid_row_idx, _ = validate_transaction_data(classified_transactions, mapping, return_all_problems=False)
+            if not is_valid:
+                logging.error(f"Invalid processed_data during reclassification: {error_msg}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=error_msg
+                )
+        
         items_to_recheck = [t for t in classified_transactions if t.get("matched_ledger") == "Suspense" and not t.get("user_confirmed")]
+        # #region agent log
+        with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A,B,C,D,E", "location": "server.py:1390", "message": "force_reclassify block entered", "data": {"force_reclassify": force_reclassify, "items_to_recheck_count": len(items_to_recheck), "mapping": str(mapping), "narration_col": narration_col}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+        # #endregion
         if items_to_recheck:
             query = select(models.LedgerRule).where(models.LedgerRule.client_id == statement.client_id)
             result = await db.execute(query)
             patterns = result.scalars().all()
             reclassification_updates = {}
-            for item in items_to_recheck:
+            invalid_items = []
+            for item_idx, item in enumerate(items_to_recheck):
+                # #region agent log
+                with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+                    log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A,B,C,D,E", "location": "server.py:1396", "message": "processing item in recheck loop", "data": {"item_keys": list(item.keys()), "narration_value": item.get('Narration'), "narration_type": str(type(item.get('Narration'))), "narration_is_none": item.get('Narration') is None, "item_sample": {k: str(v)[:50] if v is not None else None for k, v in list(item.items())[:5]}}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                # #endregion
+                narration_val = item.get('Narration')
+                
+                # Guard against None or empty narrations
+                if narration_val is None or (isinstance(narration_val, str) and narration_val.strip() == ""):
+                    invalid_items.append(item_idx)
+                    # #region agent log
+                    with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+                        log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "server.py:1405", "message": "skipping item with None/empty narration", "data": {"item_idx": item_idx, "item_keys": list(item.keys())}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                    # #endregion
+                    continue
+                
                 for pattern in patterns:
-                    if re.search(pattern.regex_pattern, item['Narration'], re.IGNORECASE):
-                        reclassification_updates[item['Narration']] = pattern.ledger_name
+                    try:
+                        # #region agent log
+                        with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+                            log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "server.py:1410", "message": "before re.search call", "data": {"narration_value": narration_val, "narration_is_none": narration_val is None, "pattern_id": pattern.id, "pattern_ledger": pattern.ledger_name}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                        # #endregion
+                        if re.search(pattern.regex_pattern, narration_val, re.IGNORECASE):
+                            reclassification_updates[narration_val] = pattern.ledger_name
+                            break
+                    except re.error as e:
+                        logging.warning(f"Invalid regex pattern for ledger {pattern.ledger_name} (ID: {pattern.id}) during reclassification: {e}. Pattern: {pattern.regex_pattern[:100]}")
+                        continue
+                    except TypeError as e:
+                        # #region agent log
+                        with open(r"d:\Custom Tools\BSClassifier\.cursor\debug.log", "a", encoding="utf-8") as log_file:
+                            log_file.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "server.py:1545", "message": "TypeError in re.search", "data": {"error": str(e), "narration_value": item.get('Narration'), "narration_type": str(type(item.get('Narration')))}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
+                        # #endregion
+                        invalid_items.append(item_idx)
                         break
+            
+            # Check for invalid items after processing all items
+            if invalid_items:
+                invalid_count = len(invalid_items)
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Found {invalid_count} transaction(s) with missing or invalid narration data. "
+                        f"This indicates malformed rows in the statement. "
+                        f"Please check the statement file and ensure all rows have complete data. "
+                        f"If the issue persists, please report this to the administrator."
+                    )
+                )
             if reclassification_updates:
                 for i, t in enumerate(classified_transactions):
                     if t['Narration'] in reclassification_updates:
@@ -1387,10 +1785,15 @@ async def classify_transactions(
     credit_clusters = await cluster_narrations(credit_transactions, "Narration", db)
     final_clusters = pre_clusters + debit_clusters + credit_clusters
     
+    # The total transactions should be the count of classified_transactions,
+    # not raw_data, since classified_transactions is what we actually work with
+    # and what the UI displays
+    total_transactions_count = len(classified_transactions)
+    
     return {
         "classified_transactions": classified_transactions,
         "unmatched_clusters": final_clusters,
-        "total_transactions": len(statement.raw_data or []),
+        "total_transactions": total_transactions_count,
         "matched_transactions": len([t for t in classified_transactions if t.get("matched_ledger") != "Suspense"]),
         "unmatched_transactions": len(transactions_to_cluster)
     }
@@ -1826,6 +2229,14 @@ async def generate_vouchers(statement_id: str, request: VoucherGenerationRequest
     bank_account = await db.get(models.BankAccount, statement.bank_account_id)
     if not bank_account: raise HTTPException(status_code=404, detail="Bank account not found")
 
+    # Check data integrity before generating vouchers
+    integrity_check = await check_data_integrity(statement_id, db)
+    if not integrity_check.is_match:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Data integrity check failed: {integrity_check.missing_count} transaction(s) are missing from processed data. Please rebuild missing transactions before generating vouchers."
+        )
+
     processed_data = statement.processed_data or []
     contra_list = set(bank_account.contra_list or [])
     filter_list = set(bank_account.filter_list or [])
@@ -2135,6 +2546,587 @@ async def get_statement(statement_id: str, db: AsyncSession = Depends(database.g
     if not statement:
         raise HTTPException(status_code=404, detail="Statement not found")
     return statement
+
+
+# Data Integrity Check Endpoint
+class PartialDataLossItem(BaseModel):
+    processed_tx: Dict[str, Any]
+    raw_tx: Dict[str, Any]
+    missing_fields: List[str]
+
+class DataIntegrityCheckResponse(BaseModel):
+    raw_data_count: int
+    processed_data_count: int
+    is_match: bool
+    
+    # Missing rows (completely absent)
+    missing_rows_count: int
+    missing_rows: List[Dict[str, Any]]
+    
+    # Partial data loss (row exists but fields missing)
+    partial_data_loss_count: int
+    partial_data_loss: List[PartialDataLossItem]
+    
+    # Extra transactions (in processed_data but not in raw_data)
+    extra_transactions_count: int
+    extra_transactions: List[Dict[str, Any]]
+    
+    # Legacy fields for backward compatibility
+    missing_count: int = 0
+    missing_transactions: List[Dict[str, Any]] = []
+
+def identify_missing_fields(processed_tx: Dict, raw_tx: Dict, mapping: Dict) -> List[str]:
+    """Returns list of field names that are missing/null in processed_tx but present in raw_tx"""
+    missing = []
+    
+    # Map processed field names to raw field names
+    narration_col = mapping.get("narration_column")
+    date_col = mapping.get("date_column")
+    amount_col = mapping.get("amount_column")
+    crdr_col = mapping.get("crdr_column")
+    
+    # Check Narration
+    processed_narration = processed_tx.get("Narration") or processed_tx.get("narration")
+    raw_narration = raw_tx.get(narration_col) if narration_col else raw_tx.get("Narration") or raw_tx.get("narration")
+    if (not processed_narration or processed_narration == "") and raw_narration:
+        missing.append("Narration")
+    
+    # Check Date
+    processed_date = processed_tx.get("Date") or processed_tx.get("date")
+    raw_date = raw_tx.get(date_col) if date_col else raw_tx.get("Date") or raw_tx.get("date")
+    if (not processed_date or processed_date == "") and raw_date:
+        missing.append("Date")
+    
+    # Check Amount
+    processed_amount = processed_tx.get("Amount") or processed_tx.get("Amount (INR)") or processed_tx.get("amount") or processed_tx.get("amt")
+    raw_amount = raw_tx.get(amount_col) if amount_col else raw_tx.get("Amount") or raw_tx.get("Amount (INR)") or raw_tx.get("amount") or raw_tx.get("amt")
+    if (processed_amount is None or processed_amount == "" or processed_amount == 0) and raw_amount and raw_amount != 0:
+        missing.append("Amount")
+    
+    # Check CR/DR
+    processed_crdr = processed_tx.get("CR/DR") or processed_tx.get("crdr")
+    raw_crdr = raw_tx.get(crdr_col) if crdr_col else raw_tx.get("CR/DR") or raw_tx.get("crdr")
+    if (not processed_crdr or processed_crdr == "") and raw_crdr:
+        missing.append("CR/DR")
+    
+    return missing
+
+@api_router.get("/statements/{statement_id}/data-integrity-check", response_model=DataIntegrityCheckResponse)
+async def check_data_integrity(statement_id: str, db: AsyncSession = Depends(database.get_db)):
+    """Check if all raw_data transactions are present in processed_data, detecting missing rows, partial data loss, and extra transactions."""
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    
+    raw_data = statement.raw_data or []
+    processed_data = statement.processed_data or []
+    
+    raw_data_count = len(raw_data)
+    processed_data_count = len(processed_data)
+    
+    # Use the same normalization functions from update_transactions
+    def _normalize_narration(n):
+        if not n:
+            return ""
+        s = str(n).strip().lower()
+        s = re.sub(r'\s+', ' ', s)
+        return s
+
+    def _normalize_date(d):
+        if not d:
+            return ""
+        s = str(d).split(' ')[0].strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+            except Exception:
+                continue
+        return s.lower()
+
+    def _normalize_amount(a):
+        if a is None:
+            return 0.0
+        try:
+            s = str(a).replace(',', '').strip()
+            return float(s)
+        except Exception:
+            try:
+                return float(re.sub(r'[^\d.-]', '', str(a)))
+            except Exception:
+                return 0.0
+
+    def get_field_value(tx, field_name, mapping=None):
+        """Helper to get field value from either raw or processed transaction"""
+        if mapping:  # Raw transaction
+            col = mapping.get(field_name)
+            if col:
+                return tx.get(col)
+            # Fallback
+            return tx.get(field_name) or tx.get(field_name.lower())
+        else:  # Processed transaction
+            return tx.get(field_name) or tx.get(field_name.lower())
+
+    def canonical_key_from_raw(tx, mapping):
+        """Create canonical key from raw_data transaction using column mapping."""
+        narration = get_field_value(tx, "narration_column", mapping) or tx.get("Narration") or tx.get("narration")
+        date = get_field_value(tx, "date_column", mapping) or tx.get("Date") or tx.get("date")
+        amount = get_field_value(tx, "amount_column", mapping) or tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        
+        return f"{_normalize_narration(narration)}||{_normalize_date(date)}||{_normalize_amount(amount)}"
+    
+    def canonical_key_from_processed(tx):
+        """Create canonical key from processed_data transaction."""
+        narration = tx.get("Narration") or tx.get("narration")
+        date = tx.get("Date") or tx.get("date")
+        amount = tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        
+        return f"{_normalize_narration(narration)}||{_normalize_date(date)}||{_normalize_amount(amount)}"
+    
+    def fuzzy_key_narration_date(tx, mapping=None):
+        """Create fuzzy key using narration and date only"""
+        if mapping:
+            narration = get_field_value(tx, "narration_column", mapping) or tx.get("Narration") or tx.get("narration")
+            date = get_field_value(tx, "date_column", mapping) or tx.get("Date") or tx.get("date")
+        else:
+            narration = tx.get("Narration") or tx.get("narration")
+            date = tx.get("Date") or tx.get("date")
+        return f"{_normalize_narration(narration)}||{_normalize_date(date)}"
+    
+    def fuzzy_key_narration_amount(tx, mapping=None):
+        """Create fuzzy key using narration and amount only"""
+        if mapping:
+            narration = get_field_value(tx, "narration_column", mapping) or tx.get("Narration") or tx.get("narration")
+            amount = get_field_value(tx, "amount_column", mapping) or tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        else:
+            narration = tx.get("Narration") or tx.get("narration")
+            amount = tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        return f"{_normalize_narration(narration)}||{_normalize_amount(amount)}"
+    
+    def fuzzy_key_date_amount(tx, mapping=None):
+        """Create fuzzy key using date and amount only"""
+        if mapping:
+            date = get_field_value(tx, "date_column", mapping) or tx.get("Date") or tx.get("date")
+            amount = get_field_value(tx, "amount_column", mapping) or tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        else:
+            date = tx.get("Date") or tx.get("date")
+            amount = tx.get("Amount") or tx.get("Amount (INR)") or tx.get("amount") or tx.get("amt")
+        return f"{_normalize_date(date)}||{_normalize_amount(amount)}"
+    
+    mapping = statement.column_mapping or {}
+    
+    # Build maps for matching
+    processed_exact_keys = {}  # exact_key -> transaction
+    processed_fuzzy_narration_date = {}  # fuzzy_key -> transaction
+    processed_fuzzy_narration_amount = {}  # fuzzy_key -> transaction
+    processed_fuzzy_date_amount = {}  # fuzzy_key -> transaction
+    
+    for tx in processed_data:
+        exact_key = canonical_key_from_processed(tx)
+        processed_exact_keys[exact_key] = tx
+        
+        # Build fuzzy keys (only if fields are present)
+        if tx.get("Narration") and tx.get("Date"):
+            processed_fuzzy_narration_date[fuzzy_key_narration_date(tx)] = tx
+        if tx.get("Narration") and tx.get("Amount"):
+            processed_fuzzy_narration_amount[fuzzy_key_narration_amount(tx)] = tx
+        if tx.get("Date") and tx.get("Amount"):
+            processed_fuzzy_date_amount[fuzzy_key_date_amount(tx)] = tx
+    
+    # Track what we've matched
+    matched_raw_keys = set()
+    missing_rows = []
+    partial_data_loss = []
+    
+    # Check each raw_data transaction
+    for raw_tx in raw_data:
+        raw_exact_key = canonical_key_from_raw(raw_tx, mapping)
+        
+        # Try exact match first
+        if raw_exact_key in processed_exact_keys:
+            matched_raw_keys.add(raw_exact_key)
+            # Check for missing fields even in exact match
+            matched_processed = processed_exact_keys[raw_exact_key]
+            missing_fields = identify_missing_fields(matched_processed, raw_tx, mapping)
+            if missing_fields:
+                partial_data_loss.append(PartialDataLossItem(
+                    processed_tx=matched_processed,
+                    raw_tx=raw_tx,
+                    missing_fields=missing_fields
+                ))
+            continue
+        
+        # Try fuzzy matches
+        matched_processed = None
+        fuzzy_key_used = None
+        
+        # Try narration + date
+        raw_fuzzy_nd = fuzzy_key_narration_date(raw_tx, mapping)
+        if raw_fuzzy_nd in processed_fuzzy_narration_date:
+            matched_processed = processed_fuzzy_narration_date[raw_fuzzy_nd]
+            fuzzy_key_used = raw_fuzzy_nd
+        # Try narration + amount
+        elif fuzzy_key_narration_amount(raw_tx, mapping) in processed_fuzzy_narration_amount:
+            matched_processed = processed_fuzzy_narration_amount[fuzzy_key_narration_amount(raw_tx, mapping)]
+        # Try date + amount
+        elif fuzzy_key_date_amount(raw_tx, mapping) in processed_fuzzy_date_amount:
+            matched_processed = processed_fuzzy_date_amount[fuzzy_key_date_amount(raw_tx, mapping)]
+        
+        if matched_processed:
+            # Found fuzzy match - this is partial data loss
+            missing_fields = identify_missing_fields(matched_processed, raw_tx, mapping)
+            if missing_fields:
+                partial_data_loss.append(PartialDataLossItem(
+                    processed_tx=matched_processed,
+                    raw_tx=raw_tx,
+                    missing_fields=missing_fields
+                ))
+            # Mark as matched
+            matched_raw_keys.add(raw_exact_key)
+        else:
+            # No match at all - completely missing row
+            missing_rows.append(raw_tx)
+    
+    # Find extra transactions (in processed_data but not in raw_data)
+    # Track which processed transactions have been matched to raw transactions
+    # This helps identify duplicates - if multiple processed transactions match the same raw transaction,
+    # all but one are duplicates/extra
+    
+    # Build maps of raw transactions by their various keys
+    raw_exact_keys = {}  # exact_key -> list of raw transactions (for tracking)
+    raw_fuzzy_nd_keys = {}  # fuzzy_key -> list of raw transactions
+    raw_fuzzy_na_keys = {}
+    raw_fuzzy_da_keys = {}
+    
+    for raw_tx in raw_data:
+        exact_key = canonical_key_from_raw(raw_tx, mapping)
+        if exact_key not in raw_exact_keys:
+            raw_exact_keys[exact_key] = []
+        raw_exact_keys[exact_key].append(raw_tx)
+        
+        fuzzy_nd = fuzzy_key_narration_date(raw_tx, mapping)
+        if fuzzy_nd not in raw_fuzzy_nd_keys:
+            raw_fuzzy_nd_keys[fuzzy_nd] = []
+        raw_fuzzy_nd_keys[fuzzy_nd].append(raw_tx)
+        
+        fuzzy_na = fuzzy_key_narration_amount(raw_tx, mapping)
+        if fuzzy_na not in raw_fuzzy_na_keys:
+            raw_fuzzy_na_keys[fuzzy_na] = []
+        raw_fuzzy_na_keys[fuzzy_na].append(raw_tx)
+        
+        fuzzy_da = fuzzy_key_date_amount(raw_tx, mapping)
+        if fuzzy_da not in raw_fuzzy_da_keys:
+            raw_fuzzy_da_keys[fuzzy_da] = []
+        raw_fuzzy_da_keys[fuzzy_da].append(raw_tx)
+    
+    # Track which processed transactions have been matched
+    matched_processed = set()  # Set of indices of processed transactions that matched
+    
+    # First pass: match processed transactions to raw transactions
+    # Mark exact matches
+    for idx, tx in enumerate(processed_data):
+        exact_key = canonical_key_from_processed(tx)
+        if exact_key in raw_exact_keys:
+            matched_processed.add(idx)
+    
+    # Second pass: mark fuzzy matches (only if not already matched)
+    for idx, tx in enumerate(processed_data):
+        if idx in matched_processed:
+            continue  # Already matched
+        
+        fuzzy_nd = fuzzy_key_narration_date(tx)
+        fuzzy_na = fuzzy_key_narration_amount(tx)
+        fuzzy_da = fuzzy_key_date_amount(tx)
+        
+        # Check if any fuzzy key matches
+        if (fuzzy_nd in raw_fuzzy_nd_keys or 
+            fuzzy_na in raw_fuzzy_na_keys or 
+            fuzzy_da in raw_fuzzy_da_keys):
+            matched_processed.add(idx)
+    
+    # Third pass: identify duplicates
+    # For each raw transaction, count how many processed transactions match it
+    # If more than one processed transaction matches the same raw transaction, mark extras as duplicates
+    raw_match_counts = {}  # raw_key -> count of processed transactions that matched it
+    
+    for idx, tx in enumerate(processed_data):
+        if idx not in matched_processed:
+            continue  # Not matched, will be handled as extra below
+        
+        exact_key = canonical_key_from_processed(tx)
+        if exact_key in raw_exact_keys:
+            if exact_key not in raw_match_counts:
+                raw_match_counts[exact_key] = 0
+            raw_match_counts[exact_key] += 1
+        else:
+            # Check fuzzy matches
+            fuzzy_nd = fuzzy_key_narration_date(tx)
+            fuzzy_na = fuzzy_key_narration_amount(tx)
+            fuzzy_da = fuzzy_key_date_amount(tx)
+            
+            matched_key = None
+            if fuzzy_nd in raw_fuzzy_nd_keys:
+                matched_key = fuzzy_nd
+            elif fuzzy_na in raw_fuzzy_na_keys:
+                matched_key = fuzzy_na
+            elif fuzzy_da in raw_fuzzy_da_keys:
+                matched_key = fuzzy_da
+            
+            if matched_key:
+                if matched_key not in raw_match_counts:
+                    raw_match_counts[matched_key] = 0
+                raw_match_counts[matched_key] += 1
+    
+    # Now identify duplicates: if multiple processed transactions match the same raw transaction,
+    # keep track of which ones are duplicates
+    duplicate_indices = set()
+    raw_match_used = {}  # raw_key -> count of how many we've "used" (should be max 1 per raw transaction)
+    
+    for idx, tx in enumerate(processed_data):
+        if idx not in matched_processed:
+            continue
+        
+        exact_key = canonical_key_from_processed(tx)
+        matched_key = None
+        
+        if exact_key in raw_exact_keys:
+            matched_key = exact_key
+        else:
+            fuzzy_nd = fuzzy_key_narration_date(tx)
+            fuzzy_na = fuzzy_key_narration_amount(tx)
+            fuzzy_da = fuzzy_key_date_amount(tx)
+            
+            if fuzzy_nd in raw_fuzzy_nd_keys:
+                matched_key = fuzzy_nd
+            elif fuzzy_na in raw_fuzzy_na_keys:
+                matched_key = fuzzy_na
+            elif fuzzy_da in raw_fuzzy_da_keys:
+                matched_key = fuzzy_da
+        
+        if matched_key:
+            if matched_key not in raw_match_used:
+                raw_match_used[matched_key] = 0
+            raw_match_used[matched_key] += 1
+            
+            # If this is the second+ match for this raw transaction, it's a duplicate
+            if raw_match_used[matched_key] > 1:
+                duplicate_indices.add(idx)
+    
+    # Extra transactions are: unmatched + duplicates
+    extra_transactions = []
+    for idx, tx in enumerate(processed_data):
+        if idx not in matched_processed or idx in duplicate_indices:
+            extra_transactions.append(tx)
+    
+    missing_rows_count = len(missing_rows)
+    partial_data_loss_count = len(partial_data_loss)
+    extra_transactions_count = len(extra_transactions)
+    
+    is_match = (missing_rows_count == 0 and 
+                partial_data_loss_count == 0 and 
+                extra_transactions_count == 0 and 
+                raw_data_count == processed_data_count)
+    
+    return DataIntegrityCheckResponse(
+        raw_data_count=raw_data_count,
+        processed_data_count=processed_data_count,
+        is_match=is_match,
+        missing_rows_count=missing_rows_count,
+        missing_rows=missing_rows,
+        partial_data_loss_count=partial_data_loss_count,
+        partial_data_loss=partial_data_loss,
+        extra_transactions_count=extra_transactions_count,
+        extra_transactions=extra_transactions,
+        # Legacy fields
+        missing_count=missing_rows_count,
+        missing_transactions=missing_rows
+    )
+
+
+# Rebuild Missing Transactions Endpoint
+class RebuildRequest(BaseModel):
+    update_partial_loss: bool = True  # Whether to update rows with missing fields
+    add_missing_rows: bool = True  # Whether to add completely missing rows
+    remove_extra_transactions: bool = False  # Whether to remove extra transactions (optional)
+
+class RebuildMissingTransactionsResponse(BaseModel):
+    message: str
+    updated_count: int  # Rows updated with missing fields
+    added_count: int  # New rows added
+    removed_count: int  # Extra rows removed
+    final_processed_count: int
+    # Legacy fields
+    rebuilt_count: int = 0
+
+@api_router.post("/statements/{statement_id}/rebuild-missing-transactions", response_model=RebuildMissingTransactionsResponse)
+async def rebuild_missing_transactions(
+    statement_id: str, 
+    request: RebuildRequest = RebuildRequest(),
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Rebuild missing transactions from raw_data, update rows with missing fields, and optionally remove extra transactions."""
+    statement = await db.get(models.BankStatement, statement_id)
+    if not statement:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    
+    # First check what needs to be fixed
+    integrity_check = await check_data_integrity(statement_id, db)
+    
+    existing = list(statement.processed_data or [])  # Make a copy to modify
+    mapping = statement.column_mapping or {}
+    updated_count = 0
+    added_count = 0
+    removed_count = 0
+    
+    # Helper functions for matching (reuse from integrity check)
+    def _normalize_narration(n):
+        if not n:
+            return ""
+        s = str(n).strip().lower()
+        s = re.sub(r'\s+', ' ', s)
+        return s
+
+    def _normalize_date(d):
+        if not d:
+            return ""
+        s = str(d).split(' ')[0].strip()
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+            except Exception:
+                continue
+        return s.lower()
+
+    def _normalize_amount(a):
+        if a is None:
+            return 0.0
+        try:
+            s = str(a).replace(',', '').strip()
+            return float(s)
+        except Exception:
+            try:
+                return float(re.sub(r'[^\d.-]', '', str(a)))
+            except Exception:
+                return 0.0
+
+    def canonical_key(tx):
+        amount = tx.get("Amount") if "Amount" in tx else tx.get("Amount (INR)") if "Amount (INR)" in tx else tx.get("amount") if "amount" in tx else tx.get("amt")
+        return f"{_normalize_narration(tx.get('Narration') or tx.get('narration'))}||{_normalize_date(tx.get('Date') or tx.get('date'))}||{_normalize_amount(amount)}"
+    
+    def get_field_from_raw(raw_tx, field_name, mapping):
+        """Get field value from raw transaction using mapping"""
+        if field_name == "Narration":
+            col = mapping.get("narration_column")
+            return raw_tx.get(col) if col else raw_tx.get("Narration") or raw_tx.get("narration")
+        elif field_name == "Date":
+            col = mapping.get("date_column")
+            return raw_tx.get(col) if col else raw_tx.get("Date") or raw_tx.get("date")
+        elif field_name == "Amount":
+            col = mapping.get("amount_column")
+            return raw_tx.get(col) if col else raw_tx.get("Amount") or raw_tx.get("Amount (INR)") or raw_tx.get("amount") or raw_tx.get("amt")
+        elif field_name == "CR/DR":
+            col = mapping.get("crdr_column")
+            return raw_tx.get(col) if col else raw_tx.get("CR/DR") or raw_tx.get("crdr")
+        return None
+    
+    # Create a map of processed transactions by canonical key for quick lookup
+    processed_map = {}
+    for idx, tx in enumerate(existing):
+        key = canonical_key(tx)
+        processed_map[key] = (idx, tx)
+    
+    # Step 1: Update existing rows with missing fields (partial data loss)
+    if request.update_partial_loss and integrity_check.partial_data_loss:
+        for partial_loss_item in integrity_check.partial_data_loss:
+            processed_tx = partial_loss_item.processed_tx
+            raw_tx = partial_loss_item.raw_tx
+            missing_fields = partial_loss_item.missing_fields
+            
+            # Find the existing transaction in processed_data
+            processed_key = canonical_key(processed_tx)
+            if processed_key in processed_map:
+                idx, existing_tx = processed_map[processed_key]
+                # Update only the missing fields from raw_data
+                updated_tx = existing_tx.copy()
+                for field in missing_fields:
+                    raw_value = get_field_from_raw(raw_tx, field, mapping)
+                    if field == "Amount":
+                        # Standardize amount
+                        updated_tx[field] = raw_value
+                    elif field == "Date":
+                        # Standardize date using create_standardized_transaction logic
+                        if raw_value:
+                            try:
+                                parsed_date = pd.to_datetime(raw_value, dayfirst=True, errors='coerce')
+                                if pd.notna(parsed_date):
+                                    updated_tx[field] = parsed_date.strftime('%d/%m/%Y')
+                                else:
+                                    updated_tx[field] = str(raw_value)
+                            except:
+                                updated_tx[field] = str(raw_value)
+                    elif field == "CR/DR":
+                        # Standardize CR/DR
+                        if raw_value:
+                            clean_cr_dr = str(raw_value).strip().replace(".", "").upper()
+                            updated_tx[field] = clean_cr_dr
+                    else:
+                        updated_tx[field] = raw_value
+                
+                # Preserve existing matched_ledger and user_confirmed
+                existing[idx] = updated_tx
+                updated_count += 1
+    
+    # Step 2: Add completely missing rows
+    if request.add_missing_rows and integrity_check.missing_rows:
+        standardized_missing = []
+        for raw_tx in integrity_check.missing_rows:
+            standardized = create_standardized_transaction(raw_tx, mapping)
+            standardized["matched_ledger"] = "Suspense"
+            standardized["user_confirmed"] = False
+            standardized_missing.append(standardized)
+            added_count += 1
+        
+        # Append new transactions
+        existing.extend(standardized_missing)
+    
+    # Step 3: Remove extra transactions (if requested)
+    if request.remove_extra_transactions and integrity_check.extra_transactions:
+        extra_keys = {canonical_key(tx) for tx in integrity_check.extra_transactions}
+        existing = [tx for tx in existing if canonical_key(tx) not in extra_keys]
+        removed_count = len(integrity_check.extra_transactions)
+    
+    # Final deduplication pass
+    seen = set()
+    final_list = []
+    for tx in existing:
+        k = canonical_key(tx)
+        if k in seen:
+            continue
+        seen.add(k)
+        final_list.append(tx)
+
+    statement.processed_data = final_list
+    await db.commit()
+    await db.refresh(statement)
+    
+    # Build success message
+    messages = []
+    if updated_count > 0:
+        messages.append(f"Updated {updated_count} row(s) with missing fields")
+    if added_count > 0:
+        messages.append(f"Added {added_count} missing row(s)")
+    if removed_count > 0:
+        messages.append(f"Removed {removed_count} extra row(s)")
+    
+    message = "Successfully completed: " + ", ".join(messages) if messages else "No changes needed"
+    
+    return RebuildMissingTransactionsResponse(
+        message=message,
+        updated_count=updated_count,
+        added_count=added_count,
+        removed_count=removed_count,
+        final_processed_count=len(final_list),
+        rebuilt_count=added_count  # Legacy field
+    )
 
 
 # Devalued Keyword Management
